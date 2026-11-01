@@ -5,23 +5,23 @@ use alloc::vec::Vec;
 
 use embassy_time::{Duration, Instant};
 
-use crate::adv::{AddrClass, Kind, Summary};
+use bluey_core::adv::{AddrClass, Kind, Summary};
+use bluey_core::proto::BleDevice;
 
 /// Most devices tracked at once. When full, the one heard longest ago is dropped.
 const MAX_DEVICES: usize = 64;
 
-#[derive(Clone)]
-pub struct Device {
-    pub addr: [u8; 6],
-    pub class: AddrClass,
-    pub kind: Kind,
-    pub name: Option<String>,
-    pub rssi: i8,
-    pub rssi_min: i8,
-    pub rssi_max: i8,
-    pub count: u32,
-    pub first_seen: Instant,
-    pub last_seen: Instant,
+struct Device {
+    addr: [u8; 6],
+    class: AddrClass,
+    kind: Kind,
+    name: Option<String>,
+    rssi: i8,
+    rssi_min: i8,
+    rssi_max: i8,
+    count: u32,
+    first_seen: Instant,
+    last_seen: Instant,
 }
 
 #[derive(Default)]
@@ -85,9 +85,24 @@ impl DeviceTable {
         self.devices.retain(|d| now - d.last_seen < max_age);
     }
 
-    /// A copy of the table, ordered by address, so it can be printed outside a lock.
-    pub fn snapshot(&self) -> Vec<Device> {
-        let mut devices = self.devices.clone();
+    /// The table as it goes on the wire, ordered by address.
+    pub fn snapshot(&self) -> Vec<BleDevice> {
+        let mut devices: Vec<BleDevice> = self
+            .devices
+            .iter()
+            .map(|d| BleDevice {
+                addr: d.addr,
+                class: d.class,
+                kind: d.kind,
+                name: d.name.clone(),
+                rssi: d.rssi,
+                rssi_min: d.rssi_min,
+                rssi_max: d.rssi_max,
+                count: d.count,
+                first_seen_ms: d.first_seen.as_millis(),
+                last_seen_ms: d.last_seen.as_millis(),
+            })
+            .collect();
         // Addresses are stored least significant byte first, so compare them reversed.
         devices.sort_unstable_by_key(|d| core::array::from_fn::<u8, 6, _>(|i| d.addr[5 - i]));
         devices

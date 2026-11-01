@@ -2,7 +2,8 @@
 include = ["esp-config.toml"]
 
 [target.riscv32imac-unknown-none-elf]
-runner = "espflash flash --monitor --chip esp32c6"
+# Output is binary, read it with `bluey monitor` rather than espflash's monitor.
+runner = "espflash flash --chip esp32c6"
 
 [build]
 rustflags = [

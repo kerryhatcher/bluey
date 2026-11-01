@@ -1,0 +1,19 @@
+[package]
+name         = "bluey-cli"
+description  = "Command line tool that reads what the bluey device has heard and logs it"
+edition.workspace      = true
+version.workspace      = true
+rust-version.workspace = true
+
+[[bin]]
+name = "bluey"
+path = "src/main.rs"
+
+[dependencies]
+anyhow     = "1"
+bluey-core = { workspace = true }
+clap       = { version = "4", features = ["derive"] }
+jiff       = { version = "0.2", features = ["serde"] }
+serde      = { workspace = true }
+serde_json = "1"
+serialport = { version = "4", default-features = false }

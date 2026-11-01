@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+use serde::{Deserialize, Serialize};
+
 const AD_SERVICE_UUIDS_16_INCOMPLETE: u8 = 0x02;
 const AD_SERVICE_UUIDS_16_COMPLETE: u8 = 0x03;
 const AD_SHORT_NAME: u8 = 0x08;
@@ -34,7 +36,7 @@ impl fmt::Display for Mac<'_> {
 }
 
 /// Address type, derived from the two top bits of a random address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AddrClass {
     Public,
     RandomStatic,
@@ -67,7 +69,7 @@ impl AddrClass {
 }
 
 /// What kind of device or protocol an advertisement most likely comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     /// Apple Find My network: AirTags and third-party Find My accessories.
     AppleFindMy,
@@ -210,4 +212,52 @@ pub fn summarize(data: &[u8]) -> Summary<'_> {
     }
 
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apple_find_my() {
+        // Flags, then Apple manufacturer data with a Find My record (type 0x12).
+        let data = [2, 0x01, 0x04, 6, 0xFF, 0x4C, 0x00, 0x12, 0x02, 0x00];
+        let summary = summarize(&data);
+        assert_eq!(summary.kind, Kind::AppleFindMy);
+        assert_eq!(summary.company, Some(COMPANY_APPLE));
+    }
+
+    #[test]
+    fn find_my_wins_over_an_earlier_record() {
+        let data = [9, 0xFF, 0x4C, 0x00, 0x10, 0x01, 0x00, 0x12, 0x01, 0x00];
+        assert_eq!(summarize(&data).kind, Kind::AppleFindMy);
+    }
+
+    #[test]
+    fn name_and_service_data() {
+        let mut data = alloc::vec![4, 0x09, b'T', b'i', b'l'];
+        data.extend([3, 0x16, 0xED, 0xFE]);
+        let summary = summarize(&data);
+        assert_eq!(summary.name, Some("Til"));
+        assert_eq!(summary.kind, Kind::Tile);
+    }
+
+    #[test]
+    fn truncated_data_does_not_panic() {
+        assert_eq!(summarize(&[9, 0xFF, 0x4C]).kind, Kind::Unknown);
+        assert_eq!(summarize(&[]).kind, Kind::Unknown);
+    }
+
+    #[test]
+    fn address_classes() {
+        assert_eq!(AddrClass::new(false, &[0; 6]), AddrClass::Public);
+        assert_eq!(AddrClass::new(true, &[0, 0, 0, 0, 0, 0xC0]), AddrClass::RandomStatic);
+        assert_eq!(AddrClass::new(true, &[0, 0, 0, 0, 0, 0x40]), AddrClass::ResolvablePrivate);
+        assert_eq!(AddrClass::new(true, &[0, 0, 0, 0, 0, 0x00]), AddrClass::NonResolvablePrivate);
+    }
+
+    #[test]
+    fn mac_prints_most_significant_byte_first() {
+        assert_eq!(alloc::format!("{}", Mac(&[1, 2, 3, 4, 5, 0xAB])), "AB:05:04:03:02:01");
+    }
 }

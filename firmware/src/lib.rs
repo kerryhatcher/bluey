@@ -2,5 +2,7 @@
 
 extern crate alloc;
 
-pub mod adv;
+pub mod logger;
+pub mod output;
 pub mod table;
+pub mod wifi;

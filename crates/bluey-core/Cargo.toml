@@ -1,0 +1,10 @@
+[package]
+name         = "bluey-core"
+description  = "Wire protocol and BLE advertisement parsing shared by the bluey firmware and CLI"
+edition.workspace      = true
+version.workspace      = true
+rust-version.workspace = true
+
+[dependencies]
+postcard = { workspace = true }
+serde    = { workspace = true }

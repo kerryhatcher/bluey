@@ -1,54 +1,22 @@
-[package]
+[workspace]
+resolver = "3"
+members  = ["crates/bluey-core", "crates/bluey-cli", "firmware"]
+# The firmware only builds for the ESP32-C6 (run cargo from inside `firmware/`), so a
+# plain `cargo build` at the root builds just the host crates.
+default-members = ["crates/bluey-core", "crates/bluey-cli"]
+
+[workspace.package]
 edition      = "2024"
-name         = "bluey"
-rust-version = "1.95"
 version      = "0.1.0"
+rust-version = "1.95"
 
-[[bin]]
-name = "bluey"
-path = "./src/bin/main.rs"
+[workspace.dependencies]
+bluey-core = { path = "crates/bluey-core" }
+postcard   = { version = "1", default-features = false, features = ["alloc"] }
+serde      = { version = "1", default-features = false, features = ["derive", "alloc"] }
 
-[dependencies]
-esp-hal = { version = "~1.2.2", features = ["esp32c6", "log-04", "unstable"] }
-
-esp-rtos = { version = "0.4.0", features = [
-  "embassy",
-  "esp-alloc",
-  "esp-radio",
-  "esp32c6",
-  "log-04",
-] }
-
-esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6", "log-04"] }
-log                    = "0.4.27"
-
-bt-hci = "0.9.0"
-embassy-futures = "0.1"
-embassy-executor = { version = "0.10.0", features = ["log"] }
-embassy-time = { version = "0.5.0", features = ["log"] }
-embedded-io = "0.7.1"
-embedded-io-async = "0.7.0"
-esp-alloc = { version = "0.11.0", features = ["esp32c6"] }
-esp-backtrace = { version = "0.20.0", features = [
-  "esp32c6",
-  "panic-handler",
-  "println",
-] }
-esp-println = { version = "0.18.0", features = ["esp32c6", "log-04"] }
-esp-radio = { version = "1.0.0-beta.1", features = [
-  "ble",
-  "esp-alloc",
-  "esp32c6",
-  "log-04",
-  "unstable",
-] }
-trouble-host = { version = "0.7.0", features = ["gatt", "scan"] }
-
-critical-section = "1.2.0"
-static_cell      = "2.1.1"
-
-
-# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
+# Profiles only take effect in the workspace root. These are for the firmware, which is
+# resource-constrained; the host crates just inherit them.
 [profile.dev]
 # The default debug profile is too slow and too big for resource-constrained devices.
 # Always build with some optimizations enabled.
