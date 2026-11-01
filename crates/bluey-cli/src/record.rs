@@ -13,6 +13,11 @@ use serde::Serialize;
 pub struct Record {
     /// When the snapshot was received.
     time: Timestamp,
+    /// The serial port it came from.
+    port: String,
+    /// The device's chip MAC address, which stays the same when it is moved to another port.
+    device: String,
+    mode: &'static str,
     uptime_ms: u64,
     ble: Vec<Ble>,
     wifi: Vec<Wifi>,
@@ -47,7 +52,7 @@ struct Wifi {
 }
 
 impl Record {
-    pub fn new(snapshot: &Snapshot) -> Result<Self> {
+    pub fn new(port: &str, snapshot: &Snapshot) -> Result<Self> {
         let now = Timestamp::now();
         // Converts a device uptime into wall-clock time.
         let at = |uptime_ms: u64| -> Result<Timestamp> {
@@ -92,6 +97,14 @@ impl Record {
             })
             .collect::<Result<_>>()?;
 
-        Ok(Self { time: now, uptime_ms: snapshot.uptime_ms, ble, wifi })
+        Ok(Self {
+            time: now,
+            port: port.to_string(),
+            device: Bssid(&snapshot.device).to_string(),
+            mode: snapshot.mode.label(),
+            uptime_ms: snapshot.uptime_ms,
+            ble,
+            wifi,
+        })
     }
 }

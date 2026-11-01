@@ -80,6 +80,11 @@ impl DeviceTable {
         }
     }
 
+    /// Forgets everything, e.g. when the radio is switched to something else.
+    pub fn clear(&mut self) {
+        self.devices.clear();
+    }
+
     /// Forgets devices not heard from for `max_age`. Rotating addresses would otherwise pile up.
     pub fn prune(&mut self, now: Instant, max_age: Duration) {
         self.devices.retain(|d| now - d.last_seen < max_age);

@@ -9,20 +9,29 @@
 
 use alloc::string::String;
 use bluey_core::adv::{AddrClass, summarize};
-use bluey_core::proto::{Message, PROTOCOL_VERSION, Snapshot};
+use bluey_core::framing::{Decoder, Item};
+use bluey_core::proto::{Command, Message, Mode, PROTOCOL_VERSION, Snapshot};
 use bluey_firmware::output;
 use bluey_firmware::table::DeviceTable;
 use bluey_firmware::wifi::AccessPointTable;
 use bt_hci::controller::ExternalController;
 use bt_hci::param::{AddrKind, FilterDuplicates, LeAdvReportsIter};
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
+use core::convert::Infallible;
 use critical_section::Mutex;
-use embassy_futures::join::join5;
 use embassy_executor::Spawner;
+use embassy_futures::join::join4;
+use embassy_futures::select::{Either, select};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
+use embedded_io_async::Read;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+use esp_hal::peripherals::{BT, WIFI};
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
+use esp_hal::Async;
 use esp_radio::ble::controller::BleConnector;
 use esp_radio::wifi::scan::{ScanConfig as WifiScanConfig, ScanTypeConfig};
 use esp_radio::wifi::sta::StationConfig;
@@ -35,18 +44,27 @@ extern crate alloc;
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 1;
 
-/// How often the table of devices is printed.
+/// How often a snapshot of the tables is sent.
 const REPORT_PERIOD: Duration = Duration::from_secs(10);
 
-/// Devices not heard from for this long are dropped from the table.
+/// Entries not heard from for this long are dropped from the tables.
 const FORGET_AFTER: Duration = Duration::from_secs(120);
-
-static DEVICES: Mutex<RefCell<DeviceTable>> = Mutex::new(RefCell::new(DeviceTable::new()));
 
 /// How often the WiFi access points are scanned for.
 const WIFI_SCAN_PERIOD: Duration = Duration::from_secs(5);
 
+static DEVICES: Mutex<RefCell<DeviceTable>> = Mutex::new(RefCell::new(DeviceTable::new()));
 static ACCESS_POINTS: Mutex<RefCell<AccessPointTable>> = Mutex::new(RefCell::new(AccessPointTable::new()));
+
+static CURRENT_MODE: Mutex<Cell<Mode>> = Mutex::new(Cell::new(Mode::Ble));
+/// The host asked for this mode.
+static MODE_REQUEST: Signal<CriticalSectionRawMutex, Mode> = Signal::new();
+/// Something wants a snapshot sent right away.
+static SNAPSHOT_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+fn current_mode() -> Mode {
+    critical_section::with(|cs| CURRENT_MODE.borrow(cs).get())
+}
 
 /// Adds every advertisement the controller reports to the device table.
 struct AdvRecorder;
@@ -67,16 +85,63 @@ impl EventHandler for AdvRecorder {
     }
 }
 
-/// Scans for WiFi access points and adds them to the access point table.
+/// Scans for Bluetooth LE devices and adds them to the device table. Only returns on failure.
 #[allow(
     clippy::large_stack_frames,
-    reason = "the config and log formatting need some stack, and these run once in main's task"
+    reason = "the BLE host resources are large, and this runs once in main's task"
 )]
-async fn scan_wifi(mut controller: WifiController<'_>) {
+async fn run_ble(bt: BT<'_>) {
+    let transport = match BleConnector::new(bt, Default::default()) {
+        Ok(transport) => transport,
+        Err(e) => return warn!("failed to start BLE: {e:?}"),
+    };
+    let ble_controller = ExternalController::<_, 1>::new(transport);
+    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
+        HostResources::new();
+    let stack = trouble_host::new(ble_controller, &mut resources).build();
+    let mut runner = stack.runner();
+    let mut scanner = Scanner::new(stack.central());
+
+    let config = ScanConfig {
+        active: true,
+        // The ESP32-C6 controller ignores this, so duplicates are merged in the device table.
+        filter_duplicates: FilterDuplicates::Disabled,
+        ..Default::default()
+    };
+
+    let handler = AdvRecorder;
+    let scan = async {
+        // Scanning stops when the session is dropped, so hold it for as long as we run.
+        let _session = loop {
+            match scanner.scan(&config).await {
+                Ok(session) => break session,
+                Err(_) => {
+                    warn!("failed to start scan, retrying");
+                    Timer::after(Duration::from_secs(1)).await;
+                }
+            }
+        };
+        core::future::pending::<()>().await;
+    };
+    match select(runner.run_with_handler(&handler), scan).await {
+        Either::First(result) => warn!("BLE host stopped: {:?}", result.err()),
+        Either::Second(()) => {}
+    }
+}
+
+/// Scans for WiFi access points and adds them to the access point table. Only returns on failure.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "the config and log formatting need some stack, and this runs once in main's task"
+)]
+async fn run_wifi(wifi: WIFI<'_>) {
+    let mut controller = match WifiController::new(wifi, Default::default()) {
+        Ok(controller) => controller,
+        Err(e) => return warn!("failed to start WiFi: {e:?}"),
+    };
     // The scan results are only used for the table, so the station never connects anywhere.
     if let Err(e) = controller.set_config(&WifiConfig::Station(StationConfig::default())) {
-        warn!("failed to start WiFi: {e:?}");
-        return;
+        return warn!("failed to configure WiFi: {e:?}");
     }
 
     let config = WifiScanConfig::default()
@@ -103,31 +168,92 @@ async fn scan_wifi(mut controller: WifiController<'_>) {
     }
 }
 
-/// Sends the device and access point tables to the host every `REPORT_PERIOD`.
+/// Waits until the host asks for a mode other than `current`.
+async fn mode_change(current: Mode) -> Mode {
+    loop {
+        let requested = MODE_REQUEST.wait().await;
+        if requested != current {
+            return requested;
+        }
+    }
+}
+
+/// Runs whichever radio the current mode needs, one at a time, and swaps them on request.
+///
+/// Switching drops the running scan, which shuts its radio down, before the other one starts.
+async fn run_radio(mut bt: BT<'static>, mut wifi: WIFI<'static>) -> Infallible {
+    let mut mode = Mode::Ble;
+    loop {
+        critical_section::with(|cs| {
+            DEVICES.borrow_ref_mut(cs).clear();
+            ACCESS_POINTS.borrow_ref_mut(cs).clear();
+            CURRENT_MODE.borrow(cs).set(mode);
+        });
+        info!("scanning for {}", mode.label());
+        // The host wants to see that the switch happened.
+        SNAPSHOT_REQUEST.signal(());
+
+        let changed = match mode {
+            Mode::Ble => select(run_ble(bt.reborrow()), mode_change(mode)).await,
+            Mode::Wifi => select(run_wifi(wifi.reborrow()), mode_change(mode)).await,
+        };
+        match changed {
+            Either::First(()) => {
+                // The scan failed. Give it a moment, then try again.
+                Timer::after(Duration::from_secs(2)).await;
+            }
+            Either::Second(requested) => mode = requested,
+        }
+    }
+}
+
+/// Reads commands from the host and acts on them.
+async fn receive_commands(mut rx: UsbSerialJtagRx<'static, Async>) -> Infallible {
+    let mut decoder = Decoder::<Command>::new();
+    let mut buf = [0u8; 64];
+    loop {
+        let n = match rx.read(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => {
+                Timer::after(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        for item in decoder.push(&buf[..n]) {
+            // Anything else on the line isn't for us.
+            let Item::Message(command) = item else { continue };
+            match command {
+                Command::SetMode(mode) if mode != current_mode() => MODE_REQUEST.signal(mode),
+                Command::SetMode(_) | Command::Snapshot => SNAPSHOT_REQUEST.signal(()),
+            }
+        }
+    }
+}
+
+/// Sends the tables to the host every `REPORT_PERIOD`, or sooner if asked.
 #[allow(
     clippy::large_stack_frames,
-    reason = "the config and log formatting need some stack, and these run once in main's task"
+    reason = "the log formatting needs some stack, and this runs once in main's task"
 )]
-async fn report_devices() {
+async fn report(device: [u8; 6]) -> Infallible {
     loop {
-        Timer::after(REPORT_PERIOD).await;
+        select(Timer::after(REPORT_PERIOD), SNAPSHOT_REQUEST.wait()).await;
         let now = Instant::now();
-        let ble = critical_section::with(|cs| {
-            let mut table = DEVICES.borrow_ref_mut(cs);
-            table.prune(now, FORGET_AFTER);
-            table.snapshot()
-        });
-        let access_points = critical_section::with(|cs| {
-            let mut table = ACCESS_POINTS.borrow_ref_mut(cs);
-            table.prune(now, FORGET_AFTER);
-            table.snapshot()
+        let (mode, ble, wifi) = critical_section::with(|cs| {
+            let mut devices = DEVICES.borrow_ref_mut(cs);
+            let mut access_points = ACCESS_POINTS.borrow_ref_mut(cs);
+            devices.prune(now, FORGET_AFTER);
+            access_points.prune(now, FORGET_AFTER);
+            (CURRENT_MODE.borrow(cs).get(), devices.snapshot(), access_points.snapshot())
         });
 
         output::send(&Message::Snapshot(Snapshot {
             protocol: PROTOCOL_VERSION,
+            device,
+            mode,
             uptime_ms: now.as_millis(),
             ble,
-            wifi: access_points,
+            wifi,
         }));
     }
 }
@@ -159,50 +285,17 @@ async fn main(_spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    // find more examples https://github.com/embassy-rs/trouble/tree/main/examples/esp32
-    let wifi = WifiController::new(peripherals.WIFI, Default::default()).unwrap();
-    let transport = BleConnector::new(peripherals.BT, Default::default()).unwrap();
-    let ble_controller = ExternalController::<_, 1>::new(transport);
-    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
-        HostResources::new();
-    let stack = trouble_host::new(ble_controller, &mut resources).build();
-    let mut runner = stack.runner();
-    let mut scanner = Scanner::new(stack.central());
+    // Output goes through esp-println; this is only for reading commands.
+    let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async().split();
+    let device = <[u8; 6]>::try_from(esp_hal::efuse::base_mac_address().as_bytes()).unwrap_or_default();
 
-    let config = ScanConfig {
-        active: true,
-        // The radio is shared with WiFi, so leave it idle for part of each interval.
-        interval: Duration::from_millis(1000),
-        window: Duration::from_millis(200),
-        // The ESP32-C6 controller ignores this, so duplicates are merged in the device table.
-        filter_duplicates: FilterDuplicates::Disabled,
-        ..Default::default()
-    };
-
-    info!("Scanning for BLE advertisements");
-    let handler = AdvRecorder;
-    let scan = async {
-        // Scanning stops when the session is dropped, so hold it for as long as we run.
-        let _session = loop {
-            match scanner.scan(&config).await {
-                Ok(session) => break session,
-                Err(_) => {
-                    warn!("failed to start scan, retrying");
-                    Timer::after(Duration::from_secs(1)).await;
-                }
-            }
-        };
-        core::future::pending::<()>().await;
-    };
-    let (result, ..) = join5(
-        runner.run_with_handler(&handler),
-        scan,
-        scan_wifi(wifi),
-        report_devices(),
+    // None of these return.
+    let (never, ..) = join4(
+        run_radio(peripherals.BT, peripherals.WIFI),
+        receive_commands(usb_rx),
+        report(device),
         output::run(),
     )
     .await;
-    panic!("BLE host stopped: {:?}", result.err());
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.2.2/examples
+    match never {}
 }

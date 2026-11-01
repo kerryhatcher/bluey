@@ -75,6 +75,11 @@ impl AccessPointTable {
         }
     }
 
+    /// Forgets everything, e.g. when the radio is switched to something else.
+    pub fn clear(&mut self) {
+        self.access_points.clear();
+    }
+
     /// Forgets access points not heard from for `max_age`.
     pub fn prune(&mut self, now: Instant, max_age: Duration) {
         self.access_points.retain(|ap| now - ap.last_seen < max_age);

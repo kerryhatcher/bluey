@@ -9,7 +9,34 @@ use serde::{Deserialize, Serialize};
 use crate::adv::{AddrClass, Kind};
 
 /// Bumped whenever the encoding of [`Message`] changes incompatibly.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
+
+/// What the device is scanning for. It has one radio, so it can only do one at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mode {
+    /// Bluetooth LE devices.
+    Ble,
+    /// WiFi access points.
+    Wifi,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ble => "ble",
+            Self::Wifi => "wifi",
+        }
+    }
+}
+
+/// What the host can ask of the device.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Command {
+    /// Switch what the device scans for. It answers with a snapshot once it has switched.
+    SetMode(Mode),
+    /// Send a snapshot now instead of waiting for the next one.
+    Snapshot,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Message {
@@ -22,11 +49,14 @@ pub enum Message {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub protocol: u16,
+    /// Identifies the device: the chip's base MAC address. Use [`Bssid`] to print it.
+    pub device: [u8; 6],
+    pub mode: Mode,
     /// Time since the device booted. All `*_ms` fields in the snapshot use this clock.
     pub uptime_ms: u64,
-    /// Bluetooth LE devices, ordered by address.
+    /// Bluetooth LE devices, ordered by address. Empty unless the device is in BLE mode.
     pub ble: Vec<BleDevice>,
-    /// WiFi access points, ordered by BSSID.
+    /// WiFi access points, ordered by BSSID. Empty unless the device is in WiFi mode.
     pub wifi: Vec<AccessPoint>,
 }
 
@@ -78,7 +108,7 @@ pub struct LogLine {
     pub text: String,
 }
 
-/// A BSSID, printed the usual way.
+/// A six byte address printed most significant byte first, as BSSIDs and chip MACs are.
 pub struct Bssid<'a>(pub &'a [u8; 6]);
 
 impl fmt::Display for Bssid<'_> {
