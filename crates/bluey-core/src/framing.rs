@@ -1,5 +1,6 @@
 //! Putting messages on the serial port and getting them back off, in both directions:
-//! [`Message`](crate::proto::Message)s from the device and [`Command`](crate::proto::Command)s to it.
+//! [`Message`](crate::proto::Message)s from the device, and [`Command`](crate::proto::Command)s
+//! and [`Feed`](crate::proto::Feed)s to it.
 //!
 //! The device shares the port with its bootloader and panic handler, which print plain text.
 //! Each message is therefore a postcard encoding wrapped in COBS, which contains no zero
@@ -125,6 +126,33 @@ mod tests {
             items,
             vec![Item::Text("ESP-ROM:esp32c6 boot\r\n".to_string()), Item::Message(message)]
         );
+    }
+
+    #[test]
+    fn feeds_round_trip() {
+        use crate::proto::{Feed, Position};
+        let feed = Feed::Position(Some(Position {
+            fix: true,
+            satellites: Some(6),
+            latitude: Some(32.5),
+            longitude: Some(-83.25),
+            altitude_m: Some(140.0),
+            hdop: Some(1.4),
+            speed_mps: None,
+            course_deg: None,
+        }));
+        // Feeds travel inside commands, so a device needs only one decoder.
+        let command = Command::Feed(feed);
+        let items = Decoder::<Command>::new().push(&encode(&command));
+        assert_eq!(items, vec![Item::Message(command)]);
+    }
+
+    #[test]
+    fn hello_round_trip() {
+        use crate::proto::{Hello, PROTOCOL_VERSION, Role};
+        let hello = Message::Hello(Hello { protocol: PROTOCOL_VERSION, role: Role::Dashboard, device: [1, 2, 3, 4, 5, 6] });
+        let items = Decoder::<Message>::new().push(&encode(&hello));
+        assert_eq!(items, vec![Item::Message(hello)]);
     }
 
     #[test]

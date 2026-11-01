@@ -14,63 +14,63 @@ use serde::Serialize;
 #[derive(Serialize)]
 pub struct Record {
     /// When the snapshot was received.
-    time: Timestamp,
+    pub(crate) time: Timestamp,
     /// The serial port it came from.
-    port: String,
+    pub(crate) port: String,
     /// The device's chip MAC address, which stays the same when it is moved to another port.
-    device: String,
-    mode: &'static str,
-    uptime_ms: u64,
-    ble: Vec<Ble>,
-    wifi: Vec<Wifi>,
-    ieee802154: Vec<Node>,
+    pub(crate) device: String,
+    pub(crate) mode: &'static str,
+    pub(crate) uptime_ms: u64,
+    pub(crate) ble: Vec<Ble>,
+    pub(crate) wifi: Vec<Wifi>,
+    pub(crate) ieee802154: Vec<Node>,
     /// Where the snapshot was taken. Absent if no GPS was in use.
     #[serde(skip_serializing_if = "Option::is_none")]
-    gps: Option<Reading>,
+    pub(crate) gps: Option<Reading>,
 }
 
 #[derive(Serialize)]
-struct Ble {
-    addr: String,
-    addr_type: &'static str,
-    kind: &'static str,
-    name: Option<String>,
-    rssi: i8,
-    rssi_min: i8,
-    rssi_max: i8,
-    count: u32,
-    first_seen: Timestamp,
-    last_seen: Timestamp,
+pub(crate) struct Ble {
+    pub(crate) addr: String,
+    pub(crate) addr_type: &'static str,
+    pub(crate) kind: &'static str,
+    pub(crate) name: Option<String>,
+    pub(crate) rssi: i8,
+    pub(crate) rssi_min: i8,
+    pub(crate) rssi_max: i8,
+    pub(crate) count: u32,
+    pub(crate) first_seen: Timestamp,
+    pub(crate) last_seen: Timestamp,
 }
 
 #[derive(Serialize)]
-struct Wifi {
-    bssid: String,
-    ssid: String,
-    channel: u8,
-    auth: String,
-    rssi: i8,
-    rssi_min: i8,
-    rssi_max: i8,
-    count: u32,
-    first_seen: Timestamp,
-    last_seen: Timestamp,
+pub(crate) struct Wifi {
+    pub(crate) bssid: String,
+    pub(crate) ssid: String,
+    pub(crate) channel: u8,
+    pub(crate) auth: String,
+    pub(crate) rssi: i8,
+    pub(crate) rssi_min: i8,
+    pub(crate) rssi_max: i8,
+    pub(crate) count: u32,
+    pub(crate) first_seen: Timestamp,
+    pub(crate) last_seen: Timestamp,
 }
 
 #[derive(Serialize)]
-struct Node {
-    pan_id: Option<String>,
-    addr: String,
-    addr_type: &'static str,
-    protocol: &'static str,
-    network_name: Option<String>,
-    channel: u8,
-    rssi: i8,
-    rssi_min: i8,
-    rssi_max: i8,
-    count: u32,
-    first_seen: Timestamp,
-    last_seen: Timestamp,
+pub(crate) struct Node {
+    pub(crate) pan_id: Option<String>,
+    pub(crate) addr: String,
+    pub(crate) addr_type: &'static str,
+    pub(crate) protocol: &'static str,
+    pub(crate) network_name: Option<String>,
+    pub(crate) channel: u8,
+    pub(crate) rssi: i8,
+    pub(crate) rssi_min: i8,
+    pub(crate) rssi_max: i8,
+    pub(crate) count: u32,
+    pub(crate) first_seen: Timestamp,
+    pub(crate) last_seen: Timestamp,
 }
 
 impl Record {

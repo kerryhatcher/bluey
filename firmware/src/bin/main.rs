@@ -361,6 +361,8 @@ async fn receive_commands(mut rx: UsbSerialJtagRx<'static, Async>) -> Infallible
                 }
                 Command::SetMode(mode) if mode != current_mode() => MODE_REQUEST.signal(mode),
                 Command::SetMode(_) | Command::Snapshot => SNAPSHOT_REQUEST.signal(()),
+                // That's for a dashboard.
+                Command::Feed(_) => {}
             }
         }
     }

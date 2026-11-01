@@ -4,7 +4,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -18,6 +18,13 @@ const ESPRESSIF_VID: u16 = 0x303a;
 
 /// The speed doesn't matter for USB serial, but the port needs one.
 const BAUD: u32 = 115_200;
+
+/// How long a read waits, which is also how soon something queued to be written goes out.
+const READ_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long a write can take. A snapshot is a few kilobytes and a small device drains the
+/// port slowly.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A device to talk to, and the mode to put it in first, if any.
 #[derive(Clone, Debug)]
@@ -114,9 +121,18 @@ pub struct Watch {
     updates: Receiver<Update>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    /// Where to hand things to be written to each port.
+    writers: Vec<(String, Sender<Vec<u8>>)>,
 }
 
 impl Watch {
+    /// Sends a command to a device. It is written by that device's thread, so this doesn't wait.
+    pub fn send(&self, port: &str, command: &Command) {
+        if let Some((_, writer)) = self.writers.iter().find(|(name, _)| name == port) {
+            let _ = writer.send(framing::encode(command));
+        }
+    }
+
     /// Waits for the next update. `Disconnected` means every device has gone away.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Update, RecvTimeoutError> {
         self.updates.recv_timeout(timeout)
@@ -141,14 +157,17 @@ impl Drop for Watch {
 pub fn watch(targets: Vec<Target>) -> Watch {
     let (tx, updates) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
+    let mut writers = Vec::new();
     let threads = targets
         .into_iter()
         .map(|target| {
             let tx = tx.clone();
             let stop = stop.clone();
+            let (writer, outgoing) = mpsc::channel();
+            writers.push((target.port.clone(), writer));
             thread::spawn(move || {
                 let port = target.port.clone();
-                let result = read_loop(&target, &stop, |item| {
+                let result = read_loop(&target, &stop, &outgoing, |item| {
                     tx.send(Update { port: port.clone(), event: Event::Item(item) }).is_ok()
                 });
                 if let Err(e) = result {
@@ -157,15 +176,20 @@ pub fn watch(targets: Vec<Target>) -> Watch {
             })
         })
         .collect();
-    Watch { updates, stop, threads }
+    Watch { updates, stop, threads, writers }
 }
 
 /// Opens the port, tells the device what we want, and passes everything it sends to `on_item`
 /// until that returns `false`.
-fn read_loop(target: &Target, stop: &AtomicBool, mut on_item: impl FnMut(Item<Message>) -> bool) -> Result<()> {
+fn read_loop(
+    target: &Target,
+    stop: &AtomicBool,
+    outgoing: &Receiver<Vec<u8>>,
+    mut on_item: impl FnMut(Item<Message>) -> bool,
+) -> Result<()> {
     let name = &target.port;
     let mut port = serialport::new(name, BAUD)
-        .timeout(Duration::from_millis(250))
+        .timeout(READ_TIMEOUT)
         .open()
         .with_context(|| format!("opening {name}"))?;
 
@@ -179,6 +203,14 @@ fn read_loop(target: &Target, stop: &AtomicBool, mut on_item: impl FnMut(Item<Me
     let mut decoder = Decoder::<Message>::new();
     let mut buf = [0u8; 4096];
     while !stop.load(Ordering::Relaxed) {
+        for frame in outgoing.try_iter() {
+            // A dashboard takes a snapshot in pieces as fast as it can draw, so allow it time.
+            port.set_timeout(WRITE_TIMEOUT).with_context(|| format!("writing to {name}"))?;
+            port.write_all(&frame)
+                .and_then(|()| port.flush())
+                .with_context(|| format!("writing to {name}"))?;
+            port.set_timeout(READ_TIMEOUT).with_context(|| format!("reading {name}"))?;
+        }
         let n = match port.read(&mut buf) {
             Ok(0) => return Err(anyhow!("{name} closed")),
             Ok(n) => n,

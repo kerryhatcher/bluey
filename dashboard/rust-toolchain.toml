@@ -1,0 +1,4 @@
+# The ESP32-S3 is Xtensa, which needs the Espressif fork of Rust (`espup install`).
+# Run `source ~/export-esp.sh` first so the linker is on the PATH.
+[toolchain]
+channel = "esp"

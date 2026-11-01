@@ -18,7 +18,8 @@ This is a cargo workspace.
 |------|------------|
 | `crates/bluey-core` | Shared by both sides, `no_std`: the messages the device sends, their framing on the serial port, and BLE advertisement parsing |
 | `crates/bluey-cli` | The `bluey` command line tool |
-| `firmware/` | The ESP32-C6 firmware |
+| `firmware/` | The ESP32-C6 scanner firmware |
+| `dashboard/` | The ESP32-S3 dashboard firmware: a screen and a web page, see [Dashboard](#dashboard-esp32-s3) |
 | `vendor/esp-radio` | `esp-radio` with two small fixes for 802.15.4, see `BLUEY-PATCHES.md` in it |
 
 The firmware targets RISC-V and has its own cargo config, so it is built from inside
@@ -68,8 +69,9 @@ bluey devices                 # each device: port, id, mode, what it has heard
 bluey mode wifi               # switch devices to WiFi (or `ble`, or `802154`)
 bluey monitor                 # show snapshots and device logs as they arrive
 bluey snapshot [--json]       # print a snapshot from each device and exit
-bluey log -o hears.jsonl      # append every snapshot to a file, one JSON object per line
+bluey log                     # record everything heard into a GeoPackage, to map and plot later
 bluey gps                     # show what a USB GPS reports
+bluey dashboard               # pass it all on to a dashboard device with a screen
 ```
 
 ### Several devices
@@ -80,7 +82,7 @@ can scan for each thing, with nothing sharing a radio:
 
 ```
 bluey monitor -p /dev/ttyACM0:ble -p /dev/ttyACM1:wifi -p /dev/ttyACM2:802154
-bluey log -o hears.jsonl -p /dev/ttyACM0:ble -p /dev/ttyACM1:wifi -p /dev/ttyACM2:802154
+bluey log -p /dev/ttyACM0:ble -p /dev/ttyACM1:wifi -p /dev/ttyACM2:802154
 bluey mode wifi -p /dev/ttyACM0       # change one while others keep going
 ```
 
@@ -112,12 +114,70 @@ PAN BEEF 7357                    (short) ch15 rssi= -61 [ -62.. -61] n=18   seen
 
 Entries not heard for 2 minutes are dropped from the device's table.
 
-Each line of `bluey log` is a snapshot from one device, with the time it was received, and
-every entry with its first and last seen times as wall-clock timestamps:
+## Recording
 
-```json
-{"time":"2026-11-01T03:54:09Z","port":"/dev/ttyACM0","device":"90:64:9B:AA:29:00","mode":"ble","uptime_ms":30386,"ble":[{"addr":"6B:E8:AD:69:A4:CE","addr_type":"rpa","kind":"Apple Nearby Info (iPhone/iPad/Mac/Watch)","name":null,"rssi":-79,"rssi_min":-80,"rssi_max":-79,"count":4,"first_seen":"2026-11-01T03:53:39.362Z","last_seen":"2026-11-01T03:54:01.43Z"}],"wifi":[]}
+`bluey log` adds everything the scanners hear to a [GeoPackage](https://www.geopackage.org/), a
+SQLite file that GIS software understands. It lives in the XDG data folder, so it is in the same
+place wherever you run the command:
+
 ```
+~/.local/share/bluey/bluey.gpkg        # or $XDG_DATA_HOME/bluey/bluey.gpkg
+```
+
+It is only ever added to, so it builds up over time (`--truncate` never touches it), and several
+runs and several scanners can all go into the one file. Use `--gpkg FILE` for a different file.
+`bluey dashboard` records too if you add `--record`.
+
+There is one layer, `observations`, with a row for every device in every snapshot (so about every
+10 seconds for each scanner):
+
+| Column | |
+|--------|-|
+| `geom` | The point where the computer was, WGS 84. Empty if the GPS had no fix |
+| `time` | When the snapshot arrived, UTC |
+| `scanner`, `port` | The scanner's chip MAC (which doesn't change with its port) and its serial port |
+| `kind` | `ble`, `wifi` or `802154` |
+| `device` | BLE address, WiFi BSSID, or 802.15.4 `PAN:address` |
+| `label` | BLE name, WiFi SSID or Thread network name, if it has one |
+| `category` | What kind of device (BLE), the security (WiFi) or Zigbee/Thread (802.15.4) |
+| `detail` | BLE address type, or 802.15.4 address type |
+| `channel` | WiFi and 802.15.4 channel |
+| `rssi` | Signal strength in dBm, the last reading before the snapshot |
+| `rssi_min`, `rssi_max` | Weakest and strongest since the scanner first heard it |
+| `count` | Advertisements (BLE), scans (WiFi) or frames (802.15.4) heard |
+| `first_seen`, `last_seen` | When the scanner first and last heard it, UTC |
+| `latitude`, `longitude`, `altitude_m`, `hdop`, `satellites` | The GPS reading, as plain columns for tools that don't do geometry |
+
+Without a GPS the rows are still recorded, just with no position. They are the signal and the
+time, which is still useful for plotting.
+
+**On a map:** open the file in QGIS (Layer, Add Layer, Add Vector Layer). Style the points by `rssi`
+to see where a signal was strong, and use the temporal controller on `time` to play it back.
+
+**With SQL**, from `sqlite3 ~/.local/share/bluey/bluey.gpkg` or any SQLite tool:
+
+```sql
+-- How strong one device was over time, and where
+SELECT time, rssi, latitude, longitude FROM observations
+WHERE kind = 'wifi' AND device = 'F4:92:BF:92:56:C9' ORDER BY time;
+
+-- Where each WiFi network was loudest
+SELECT label, max(rssi) AS best, latitude, longitude FROM observations
+WHERE kind = 'wifi' AND geom IS NOT NULL GROUP BY device;
+```
+
+**In Python:** `geopandas.read_file(path, layer="observations")` gives a GeoDataFrame with real
+datetimes, ready for `matplotlib`.
+
+Things to know when reading it:
+
+- A scanner reports a device once per snapshot, with its latest signal. It doesn't record every
+  advertisement, so the time resolution is about 10 seconds.
+- The position is the computer's, not the scanner's, so it is only as close as they are.
+- Phones and AirTags change their address about every 15 minutes, so one of them shows up as
+  many `device` values over a day.
+- **It holds your location and the addresses of the devices around you.** Keep it somewhere you
+  trust, and delete rows you don't need (`DELETE FROM observations WHERE time < '2026-01-01'`).
 
 ## Development
 
@@ -129,15 +189,15 @@ cd firmware && cargo clippy --release       # firmware
 
 ### Position from a GPS
 
-If a USB GPS is plugged in, `bluey log` puts its position in every record, so you can map where
+If a USB GPS is plugged in, `bluey log` puts its position on every row, so you can map where
 things were heard. It looks for one among the USB serial ports that aren't bluey devices, and
 accepts any receiver that sends NMEA over serial (most USB pucks do), at 4800, 9600, 38400 or
 115200 baud. To name one instead, or to turn the search off:
 
 ```
-bluey log -o hears.jsonl --gps /dev/ttyUSB0          # speed is detected
-bluey log -o hears.jsonl --gps /dev/ttyUSB0:4800     # or given
-bluey log -o hears.jsonl --no-gps
+bluey log --gps /dev/ttyUSB0          # speed is detected
+bluey log --gps /dev/ttyUSB0:4800     # or given
+bluey log --no-gps
 ```
 
 Searching opens each candidate port and listens for a second or two. That is harmless for a
@@ -146,8 +206,10 @@ use `--gps` or `--no-gps` if you have one plugged in. `bluey gps` shows the posi
 second, which is a quick way to see whether the receiver has a fix yet. That takes a minute or
 two from a cold start, and a clear view of the sky.
 
-Each record gets a `gps` object. Without a fix it only says so, and how many satellites the
-receiver is using:
+In the GeoPackage the position is the row's `geom` and the GPS columns. The JSON output, if you
+ask for it (`bluey log -o FILE` appends one JSON object per snapshot per line, and
+`bluey snapshot --json` prints one), has a `gps` object instead. Without a fix it only says so, and
+how many satellites the receiver is using:
 
 ```json
 "gps":{"fix":true,"satellites":6,"latitude":48.1173,"longitude":11.516667,"altitude_m":545.4,"hdop":0.9,"speed_mps":0.0,"course_deg":84.4,"age_ms":43}
@@ -158,6 +220,83 @@ receiver is using:
 2 is good. `age_ms` is how long ago the receiver last reported, and a reading older than five
 seconds counts as no fix. Records have no `gps` field when no GPS is in use. Note that a log
 with positions records where you were, so think before sharing it.
+
+## Dashboard (ESP32-S3)
+
+A second kind of device, a [Seeed XIAO ESP32S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/)
+with an Adafruit 1.14" 240x135 ST7789 display. It scans for nothing. It shows what the scanners
+heard, and the GPS position, in two ways:
+
+- **On its screen**: the Wi-Fi network and address, the position, and one line per scanner with
+  what it is scanning for, how much it has heard and how long ago.
+- **On a web page**, served from a Wi-Fi network it makes itself. Join the network with your phone
+  and open the dashboard (a "sign in to network" prompt usually offers it, or go to
+  <http://192.168.4.1/>). It lists everything each scanner has heard, strongest signal first, and
+  can be filtered.
+
+It can't reach the scanners itself. The computer is the go-between: `bluey dashboard` reads the
+scanners and the GPS as usual and passes it all on to the dashboard over its USB cable, so the
+computer has to stay plugged in and running.
+
+```
+bluey dashboard                          # scanners and GPS -> dashboard
+bluey dashboard --record                 # and record them too, like `bluey log`
+bluey dashboard -p /dev/ttyACM0:ble -p /dev/ttyACM1:wifi
+```
+
+`bluey devices` lists a dashboard as one, and the other commands leave it alone. The CLI finds it
+by asking every device what it is.
+
+### Wiring
+
+The display shares the SPI bus with the Wio-SX1262 LoRa module, which is left idle. The pins match
+the `remotectl` project, so the same wiring works.
+
+| Display pin | XIAO pin | GPIO |
+|-------------|----------|------|
+| V+ | 3V3 | |
+| G | GND | |
+| CL (clock) | D8 | 7 |
+| DA (data) | D10 | 9 |
+| CS | D6 | 43 |
+| DC | D7 | 44 |
+| BL (backlight) | not connected, so always on | |
+
+The display has no reset pin. If the picture is shifted or cropped, adjust `DISPLAY_OFFSET_X` and
+`DISPLAY_OFFSET_Y` in `dashboard/src/bin/main.rs`.
+
+### Build and flash
+
+The ESP32-S3 is Xtensa, which needs Espressif's fork of Rust: `espup install`, which also gives
+`~/export-esp.sh`. The access point's password is compiled in and the build fails without it.
+
+```
+source ~/export-esp.sh
+cd dashboard
+BLUEY_AP_PASSWORD='at least 8 characters' cargo build --release
+espflash flash --chip esp32s3 ../target/xtensa-esp32s3-none-elf/release/bluey-dashboard
+```
+
+| Variable | |
+|----------|-|
+| `BLUEY_AP_PASSWORD` | Required. The Wi-Fi password (WPA2, 8 to 63 characters). It protects the position and the list of what's around you, so don't leave it as something obvious. |
+| `BLUEY_AP_SSID` | The network's name. Default `bluey`. |
+
+The board has to be in its ROM bootloader to be flashed if it is running firmware that uses
+the USB port for something else (as the `remotectl` firmware does): hold **B** (the tiny button
+beside the USB-C port) while plugging it in, flash, then tap **R**. Once the dashboard firmware is
+on it, it appears as a serial port like the scanners do and `espflash` can reset it itself.
+
+Flashing this **replaces whatever is on the board**, including `remotectl`.
+
+### Limits
+
+- Up to 4 phones at once, 8 scanners.
+- The web page and the Wi-Fi network are plain HTTP over WPA2. Anyone with the password sees the
+  position, so treat it like one.
+- It only shows what the computer sends. If `bluey dashboard` stops, the screen and page keep the
+  last snapshots and show how old they are, and the position is dropped after 30 seconds.
+- The scanners' USB cables carry their data to the computer, not to the dashboard.
 
 ## 802.15.4 (Zigbee and Thread)
 

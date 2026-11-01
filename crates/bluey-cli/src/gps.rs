@@ -227,6 +227,21 @@ impl Gps {
     }
 }
 
+impl From<&Reading> for bluey_core::proto::Position {
+    fn from(r: &Reading) -> Self {
+        Self {
+            fix: r.fix,
+            satellites: r.satellites,
+            latitude: r.latitude,
+            longitude: r.longitude,
+            altitude_m: r.altitude_m,
+            hdop: r.hdop,
+            speed_mps: r.speed_mps,
+            course_deg: r.course_deg,
+        }
+    }
+}
+
 impl Drop for Gps {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

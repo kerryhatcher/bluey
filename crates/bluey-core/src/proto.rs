@@ -50,8 +50,11 @@ impl Mode {
 pub enum Command {
     /// Switch what the device scans for. It answers with a snapshot once it has switched.
     SetMode(Mode),
-    /// Send a snapshot now instead of waiting for the next one.
+    /// Send a snapshot now instead of waiting for the next one. A device that doesn't scan
+    /// answers with a [`Hello`] instead.
     Snapshot,
+    /// Data for a dashboard. Scanners ignore it.
+    Feed(Feed),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,6 +63,58 @@ pub enum Message {
     Snapshot(Snapshot),
     /// A line from the device's log.
     Log(LogLine),
+    /// Says what the device is. Sent by devices that don't scan, in reply to
+    /// [`Command::Snapshot`], so the host can tell them from the scanners.
+    Hello(Hello),
+}
+
+/// What a bluey device does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// Scans for BLE, WiFi or 802.15.4 devices and sends [`Snapshot`]s.
+    Scanner,
+    /// Shows what the host feeds it ([`Feed`]) on a screen and a web page.
+    Dashboard,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hello {
+    pub protocol: u16,
+    pub role: Role,
+    /// The chip's base MAC address.
+    pub device: [u8; 6],
+}
+
+/// What the host sends a dashboard, inside a [`Command::Feed`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Feed {
+    /// The latest snapshot from one scanner.
+    Source(Source),
+    /// Where the host is. `None` when it has no GPS.
+    Position(Option<Position>),
+}
+
+/// A scanner's latest snapshot, as passed on to a dashboard.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Source {
+    /// A name for the scanner, e.g. its serial port.
+    pub name: String,
+    pub snapshot: Snapshot,
+}
+
+/// A GPS reading.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Position {
+    /// Whether the receiver has a position. If not, only `satellites` means anything.
+    pub fix: bool,
+    pub satellites: Option<u8>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub altitude_m: Option<f64>,
+    /// Horizontal dilution of precision: lower is better, under 2 is good.
+    pub hdop: Option<f64>,
+    pub speed_mps: Option<f64>,
+    pub course_deg: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

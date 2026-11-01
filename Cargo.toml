@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members  = ["crates/bluey-core", "crates/bluey-cli", "firmware"]
+members  = ["crates/bluey-core", "crates/bluey-cli", "firmware", "dashboard"]
 # The firmware only builds for the ESP32-C6 (run cargo from inside `firmware/`), so a
 # plain `cargo build` at the root builds just the host crates.
 default-members = ["crates/bluey-core", "crates/bluey-cli"]

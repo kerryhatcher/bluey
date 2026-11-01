@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bluey</title>
+<style>
+:root {
+  --bg: #f4f6f8; --card: #ffffff; --text: #17202a; --muted: #5d6b79; --line: #dde3e9;
+  --ble: #2563eb; --wifi: #15803d; --z154: #9333ea; --warn: #b45309; --bad: #b91c1c; --ok: #15803d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1319; --card: #171e26; --text: #e6ebf0; --muted: #93a1af; --line: #28323d;
+    --ble: #6ea0ff; --wifi: #4ade80; --z154: #c084fc; --warn: #fbbf24; --bad: #f87171; --ok: #4ade80;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 12px 16px 40px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+h1 { margin: 0; font-size: 22px; letter-spacing: .02em; }
+.pill { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 6px; }
+.dot.off { background: var(--bad); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+.card h2 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.row { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.card > .sub { margin-bottom: 4px; }
+.main { min-width: 0; }
+.title { font-weight: 600; overflow-wrap: anywhere; }
+.sub { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.side { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.badge { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; color: #fff; margin-left: 8px; vertical-align: middle; }
+.ble { background: var(--ble); } .wifi { background: var(--wifi); } .ieee802154 { background: var(--z154); }
+.stale { color: var(--warn); font-weight: 600; }
+.bars { display: inline-flex; gap: 2px; align-items: flex-end; height: 14px; margin-left: 6px; vertical-align: middle; }
+.bars i { width: 4px; background: var(--line); border-radius: 1px; }
+.bars i:nth-child(1) { height: 4px; } .bars i:nth-child(2) { height: 7px; } .bars i:nth-child(3) { height: 10px; } .bars i:nth-child(4) { height: 14px; }
+.bars i.on { background: var(--text); }
+.empty { color: var(--muted); padding: 8px 0; }
+input { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); font: inherit; margin-bottom: 12px; }
+.pos { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+a { color: var(--ble); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>bluey</h1>
+    <span class="pill" id="status"><span class="dot off"></span>connecting</span>
+  </header>
+  <input id="filter" type="search" placeholder="Filter by name, address, network..." autocomplete="off">
+  <div id="gps"></div>
+  <div id="sources"></div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let state = null;
+
+// Names come from whatever is advertising nearby, so never put them in the page as HTML.
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const ago = (s) => (s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : Math.floor(s / 3600) + "h");
+const bars = (rssi) => {
+  const level = rssi > -55 ? 4 : rssi > -65 ? 3 : rssi > -75 ? 2 : rssi > -85 ? 1 : 0;
+  return '<span class="bars">' + [1, 2, 3, 4].map((n) => '<i class="' + (n <= level ? "on" : "") + '"></i>').join("") + "</span>";
+};
+
+function gps(p) {
+  if (!p) return '<div class="card"><h2>Position</h2><div class="empty">No GPS is feeding the dashboard.</div></div>';
+  if (!p.fix) {
+    return '<div class="card"><h2>Position</h2><div class="empty">No fix yet' +
+      (p.satellites != null ? ", " + esc(p.satellites) + " satellites in use" : "") + ".</div></div>";
+  }
+  const lat = p.latitude.toFixed(6), lon = p.longitude.toFixed(6);
+  const bits = [];
+  if (p.satellites != null) bits.push(p.satellites + " satellites");
+  if (p.altitude_m != null) bits.push(Math.round(p.altitude_m) + " m");
+  if (p.hdop != null) bits.push("hdop " + p.hdop.toFixed(1));
+  if (p.speed_mps) bits.push((p.speed_mps * 3.6).toFixed(0) + " km/h");
+  return '<div class="card"><h2>Position' + (p.age_s > 10 ? ' <span class="stale">(' + ago(p.age_s) + " old)</span>" : "") + "</h2>" +
+    '<div class="pos"><a href="geo:' + lat + "," + lon + '">' + lat + ", " + lon + "</a></div>" +
+    '<div class="sub">' + esc(bits.join(" · ")) + "</div></div>";
+}
+
+// One line each for the title and the details, and the numbers on the right.
+function item(title, sub, rssi, count, age) {
+  return '<div class="row"><div class="main"><div class="title">' + esc(title) + '</div><div class="sub">' + esc(sub) +
+    '</div></div><div class="side">' + esc(rssi) + " dBm" + bars(rssi) + '<div class="sub">n=' + esc(count) + " · " + ago(age) + "</div></div></div>";
+}
+
+function rows(s) {
+  if (s.mode === "ble") {
+    return s.ble.map((d) => ({ rssi: d.rssi, text: [d.kind, d.name, d.addr, d.type].join(" "),
+      html: item(d.name || d.kind, d.addr + " · " + d.type + (d.name ? " · " + d.kind : ""), d.rssi, d.count, d.age_s) }));
+  }
+  if (s.mode === "wifi") {
+    return s.wifi.map((a) => ({ rssi: a.rssi, text: [a.ssid, a.bssid, a.auth].join(" "),
+      html: item(a.ssid || "<hidden>", a.bssid + " · ch" + a.channel + " · " + a.auth, a.rssi, a.count, a.age_s) }));
+  }
+  return s.ieee802154.map((n) => ({ rssi: n.rssi, text: [n.protocol, n.network, n.pan, n.addr].join(" "),
+    html: item(n.protocol + (n.network ? " · " + n.network : ""), "PAN " + (n.pan || "?") + " · " + n.addr + " · ch" + n.channel, n.rssi, n.count, n.age_s) }));
+}
+
+function source(s, filter) {
+  const all = rows(s);
+  const shown = all.filter((r) => !filter || r.text.toLowerCase().includes(filter)).sort((a, b) => b.rssi - a.rssi);
+  const label = s.mode === "ieee802154" ? "802.15.4" : s.mode;
+  const stale = s.age_s > 30;
+  return '<div class="card"><h2>' + esc(s.name) + '<span class="badge ' + esc(s.mode) + '">' + esc(label) + "</span></h2>" +
+    '<div class="sub">' + all.length + " heard · updated " + (stale ? '<span class="stale">' + ago(s.age_s) + " ago</span>" : ago(s.age_s) + " ago") + "</div>" +
+    (shown.length ? shown.map((r) => r.html).join("") : '<div class="empty">' + (all.length ? "Nothing matches the filter." : "Nothing heard yet.") + "</div>") + "</div>";
+}
+
+function render() {
+  if (!state) return;
+  const filter = $("filter").value.trim().toLowerCase();
+  $("gps").innerHTML = gps(state.position);
+  $("sources").innerHTML = state.sources.length
+    ? state.sources.map((s) => source(s, filter)).join("")
+    : '<div class="card"><div class="empty">Waiting for the scanners. Run <code>bluey dashboard</code> on the computer this is plugged into.</div></div>';
+}
+
+function status(ok) {
+  const clients = state ? " · " + state.clients + " connected" : "";
+  $("status").innerHTML = '<span class="dot ' + (ok ? "" : "off") + '"></span>' + (ok ? esc(state.ssid) + clients : "no connection");
+}
+
+async function tick() {
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    state = await response.json();
+    status(true);
+    render();
+  } catch (e) {
+    status(false);
+  }
+}
+
+$("filter").addEventListener("input", render);
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
