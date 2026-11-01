@@ -7,11 +7,14 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+#[cfg(feature = "wifi")]
 use alloc::string::String;
 use bluey_core::adv::{AddrClass, summarize};
 use bluey_core::framing::{Decoder, Item};
 use bluey_core::proto::{Command, Message, Mode, PROTOCOL_VERSION, Snapshot};
+use bluey_firmware::nodes::NodeTable;
 use bluey_firmware::output;
+use bluey_firmware::settings::Settings;
 use bluey_firmware::table::DeviceTable;
 use bluey_firmware::wifi::AccessPointTable;
 use bt_hci::controller::ExternalController;
@@ -28,13 +31,24 @@ use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::Read;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
-use esp_hal::peripherals::{BT, WIFI};
+use esp_hal::peripherals::{BT, FLASH};
+#[cfg(feature = "wifi")]
+use esp_hal::peripherals::WIFI;
+#[cfg(feature = "ieee802154")]
+use esp_hal::peripherals::IEEE802154;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx};
 use esp_hal::Async;
 use esp_radio::ble::controller::BleConnector;
+#[cfg(feature = "ieee802154")]
+use bluey_core::ieee802154;
+#[cfg(feature = "ieee802154")]
+use esp_radio::ieee802154::{Config as RadioConfig, Ieee802154};
+#[cfg(feature = "wifi")]
 use esp_radio::wifi::scan::{ScanConfig as WifiScanConfig, ScanTypeConfig};
+#[cfg(feature = "wifi")]
 use esp_radio::wifi::sta::StationConfig;
+#[cfg(feature = "wifi")]
 use esp_radio::wifi::{Config as WifiConfig, WifiController};
 use log::{info, warn};
 use trouble_host::prelude::*;
@@ -50,11 +64,22 @@ const REPORT_PERIOD: Duration = Duration::from_secs(10);
 /// Entries not heard from for this long are dropped from the tables.
 const FORGET_AFTER: Duration = Duration::from_secs(120);
 
+/// How long to listen on each 802.15.4 channel before moving to the next.
+#[cfg(feature = "ieee802154")]
+const CHANNEL_DWELL: Duration = Duration::from_millis(500);
+
+/// The channels 802.15.4 uses in the 2.4 GHz band, which is all the ESP32-C6 can do.
+#[cfg(feature = "ieee802154")]
+const IEEE802154_CHANNELS: core::ops::RangeInclusive<u8> = 11..=26;
+
 /// How often the WiFi access points are scanned for.
+#[cfg(feature = "wifi")]
 const WIFI_SCAN_PERIOD: Duration = Duration::from_secs(5);
 
 static DEVICES: Mutex<RefCell<DeviceTable>> = Mutex::new(RefCell::new(DeviceTable::new()));
 static ACCESS_POINTS: Mutex<RefCell<AccessPointTable>> = Mutex::new(RefCell::new(AccessPointTable::new()));
+
+static NODES: Mutex<RefCell<NodeTable>> = Mutex::new(RefCell::new(NodeTable::new()));
 
 static CURRENT_MODE: Mutex<Cell<Mode>> = Mutex::new(Cell::new(Mode::Ble));
 /// The host asked for this mode.
@@ -130,6 +155,7 @@ async fn run_ble(bt: BT<'_>) {
 }
 
 /// Scans for WiFi access points and adds them to the access point table. Only returns on failure.
+#[cfg(feature = "wifi")]
 #[allow(
     clippy::large_stack_frames,
     reason = "the config and log formatting need some stack, and this runs once in main's task"
@@ -168,6 +194,99 @@ async fn run_wifi(wifi: WIFI<'_>) {
     }
 }
 
+/// The radio has received a frame.
+#[cfg(feature = "ieee802154")]
+static FRAME_RECEIVED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+#[cfg(feature = "ieee802154")]
+fn frame_received() {
+    FRAME_RECEIVED.signal(());
+}
+
+/// Listens for Zigbee and Thread devices, moving through the channels, and adds what it hears
+/// to the node table. Never returns.
+#[cfg(feature = "ieee802154")]
+#[allow(
+    clippy::large_stack_frames,
+    reason = "the frame buffers are large, and this runs once in main's task"
+)]
+async fn run_ieee802154(radio: IEEE802154<'_>) {
+    let mut radio = Ieee802154::new(radio);
+    radio.set_rx_available_callback_fn(frame_received);
+
+    for channel in IEEE802154_CHANNELS.cycle() {
+        radio.set_config(RadioConfig {
+            channel,
+            // Listen to everything on the channel, not just frames for us, and don't answer any.
+            promiscuous: true,
+            rx_when_idle: true,
+            ..Default::default()
+        });
+        // Not `start_receive`, which does nothing when already listening, so the channel wouldn't change.
+        radio.restart_receive();
+
+        let end = Instant::now() + CHANNEL_DWELL;
+        loop {
+            while let Some(received) = radio.raw_received() {
+                record_frame(&received.data, received.channel);
+            }
+            if matches!(select(FRAME_RECEIVED.wait(), Timer::at(end)).await, Either::Second(())) {
+                break;
+            }
+        }
+    }
+}
+
+/// Adds a received frame to the node table.
+#[cfg(feature = "ieee802154")]
+fn record_frame(data: &[u8], channel: u8) {
+    // The first byte is the length of what follows, which ends with two bytes where the
+    // checksum would be. The radio puts the signal strength in the first of them.
+    let len = usize::from(data[0]);
+    if len < 3 || len >= data.len() {
+        return;
+    }
+    let rssi = data[len - 1] as i8;
+    let Some(frame) = ieee802154::parse(&data[1..len - 1]) else {
+        return;
+    };
+    // Frames with no sender, like acknowledgements, say nothing about who is there.
+    let Some(src) = frame.src else { return };
+    let sender = ieee802154::classify(&frame);
+    critical_section::with(|cs| {
+        NODES.borrow_ref_mut(cs).record(
+            frame.pan_id,
+            src,
+            sender.protocol,
+            sender.network_name.as_deref(),
+            channel,
+            rssi,
+            Instant::now(),
+        );
+    });
+}
+
+#[cfg(all(feature = "wifi", feature = "ieee802154"))]
+compile_error!("WiFi and 802.15.4 can't both be built in; use `--no-default-features --features ieee802154`");
+
+/// The modes this firmware can switch to. WiFi and 802.15.4 can't both be built in.
+const SUPPORTED: &[Mode] = &[
+    Mode::Ble,
+    #[cfg(feature = "wifi")]
+    Mode::Wifi,
+    #[cfg(feature = "ieee802154")]
+    Mode::Ieee802154,
+];
+
+/// The peripherals the radios use.
+struct Radios {
+    bt: BT<'static>,
+    #[cfg(feature = "wifi")]
+    wifi: WIFI<'static>,
+    #[cfg(feature = "ieee802154")]
+    ieee802154: IEEE802154<'static>,
+}
+
 /// Waits until the host asks for a mode other than `current`.
 async fn mode_change(current: Mode) -> Mode {
     loop {
@@ -181,12 +300,16 @@ async fn mode_change(current: Mode) -> Mode {
 /// Runs whichever radio the current mode needs, one at a time, and swaps them on request.
 ///
 /// Switching drops the running scan, which shuts its radio down, before the other one starts.
-async fn run_radio(mut bt: BT<'static>, mut wifi: WIFI<'static>) -> Infallible {
-    let mut mode = Mode::Ble;
+/// The mode is saved then, while no radio is busy, and restored after a reset.
+async fn run_radio(mut radios: Radios, flash: FLASH<'static>) -> Infallible {
+    let mut settings = Settings::new(flash);
+    // A mode saved by a firmware with a different radio is no use here.
+    let mut mode = settings.load_mode().filter(|m| SUPPORTED.contains(m)).unwrap_or(Mode::Ble);
     loop {
         critical_section::with(|cs| {
             DEVICES.borrow_ref_mut(cs).clear();
             ACCESS_POINTS.borrow_ref_mut(cs).clear();
+            NODES.borrow_ref_mut(cs).clear();
             CURRENT_MODE.borrow(cs).set(mode);
         });
         info!("scanning for {}", mode.label());
@@ -194,15 +317,24 @@ async fn run_radio(mut bt: BT<'static>, mut wifi: WIFI<'static>) -> Infallible {
         SNAPSHOT_REQUEST.signal(());
 
         let changed = match mode {
-            Mode::Ble => select(run_ble(bt.reborrow()), mode_change(mode)).await,
-            Mode::Wifi => select(run_wifi(wifi.reborrow()), mode_change(mode)).await,
+            Mode::Ble => select(run_ble(radios.bt.reborrow()), mode_change(mode)).await,
+            #[cfg(feature = "wifi")]
+            Mode::Wifi => select(run_wifi(radios.wifi.reborrow()), mode_change(mode)).await,
+            #[cfg(feature = "ieee802154")]
+            Mode::Ieee802154 => select(run_ieee802154(radios.ieee802154.reborrow()), mode_change(mode)).await,
+            // Commands for modes we don't have are turned away, so this isn't reached.
+            #[allow(unreachable_patterns)]
+            _ => Either::Second(mode_change(mode).await),
         };
         match changed {
             Either::First(()) => {
                 // The scan failed. Give it a moment, then try again.
                 Timer::after(Duration::from_secs(2)).await;
             }
-            Either::Second(requested) => mode = requested,
+            Either::Second(requested) => {
+                mode = requested;
+                settings.save_mode(mode);
+            }
         }
     }
 }
@@ -223,6 +355,10 @@ async fn receive_commands(mut rx: UsbSerialJtagRx<'static, Async>) -> Infallible
             // Anything else on the line isn't for us.
             let Item::Message(command) = item else { continue };
             match command {
+                Command::SetMode(mode) if !SUPPORTED.contains(&mode) => {
+                    warn!("this firmware can't scan for {}", mode.label());
+                    SNAPSHOT_REQUEST.signal(());
+                }
                 Command::SetMode(mode) if mode != current_mode() => MODE_REQUEST.signal(mode),
                 Command::SetMode(_) | Command::Snapshot => SNAPSHOT_REQUEST.signal(()),
             }
@@ -239,21 +375,25 @@ async fn report(device: [u8; 6]) -> Infallible {
     loop {
         select(Timer::after(REPORT_PERIOD), SNAPSHOT_REQUEST.wait()).await;
         let now = Instant::now();
-        let (mode, ble, wifi) = critical_section::with(|cs| {
+        let (mode, ble, wifi, ieee802154) = critical_section::with(|cs| {
             let mut devices = DEVICES.borrow_ref_mut(cs);
             let mut access_points = ACCESS_POINTS.borrow_ref_mut(cs);
+            let mut nodes = NODES.borrow_ref_mut(cs);
             devices.prune(now, FORGET_AFTER);
             access_points.prune(now, FORGET_AFTER);
-            (CURRENT_MODE.borrow(cs).get(), devices.snapshot(), access_points.snapshot())
+            nodes.prune(now, FORGET_AFTER);
+            (CURRENT_MODE.borrow(cs).get(), devices.snapshot(), access_points.snapshot(), nodes.snapshot())
         });
 
         output::send(&Message::Snapshot(Snapshot {
             protocol: PROTOCOL_VERSION,
             device,
             mode,
+            supported: SUPPORTED.to_vec(),
             uptime_ms: now.as_millis(),
             ble,
             wifi,
+            ieee802154,
         }));
     }
 }
@@ -291,7 +431,16 @@ async fn main(_spawner: Spawner) -> ! {
 
     // None of these return.
     let (never, ..) = join4(
-        run_radio(peripherals.BT, peripherals.WIFI),
+        run_radio(
+            Radios {
+                bt: peripherals.BT,
+                #[cfg(feature = "wifi")]
+                wifi: peripherals.WIFI,
+                #[cfg(feature = "ieee802154")]
+                ieee802154: peripherals.IEEE802154,
+            },
+            peripherals.FLASH,
+        ),
         receive_commands(usb_rx),
         report(device),
         output::run(),

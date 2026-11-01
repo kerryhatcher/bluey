@@ -1,7 +1,7 @@
 //! Printing what the devices send.
 
 use bluey_core::adv::Mac;
-use bluey_core::proto::{Bssid, LogLevel, LogLine, Mode, Snapshot};
+use bluey_core::proto::{Bssid, LogLevel, LogLine, Mode, NodeAddr, Snapshot};
 
 use crate::port;
 
@@ -11,6 +11,15 @@ pub fn label(port: &str, snapshot: Option<&Snapshot>) -> String {
     match snapshot {
         Some(s) => format!("{name} [{}]", s.mode.label()),
         None => name.to_string(),
+    }
+}
+
+/// How much the device has heard, for one line summaries.
+pub fn summary(snapshot: &Snapshot) -> String {
+    match snapshot.mode {
+        Mode::Ble => format!("{} BLE devices", snapshot.ble.len()),
+        Mode::Wifi => format!("{} WiFi access points", snapshot.wifi.len()),
+        Mode::Ieee802154 => format!("{} 802.15.4 devices", snapshot.ieee802154.len()),
     }
 }
 
@@ -51,6 +60,29 @@ pub fn snapshot(port: &str, snapshot: &Snapshot) {
                     age(ap.last_seen_ms),
                     if ap.ssid.is_empty() { "<hidden>" } else { &ap.ssid },
                     ap.auth,
+                );
+            }
+        }
+        Mode::Ieee802154 => {
+            println!("---- {}: {} 802.15.4 devices ----", label(port, Some(snapshot)), snapshot.ieee802154.len());
+            for n in &snapshot.ieee802154 {
+                let pan = n.pan_id.map_or("----".to_string(), |p| format!("{p:04X}"));
+                let kind = match n.addr {
+                    NodeAddr::Short(_) => "short",
+                    NodeAddr::Extended(_) => "ext",
+                };
+                let name = n.network_name.as_ref().map(|name| format!(" network={name:?}")).unwrap_or_default();
+                println!(
+                    "PAN {pan} {:<23} ({kind:>5}) ch{:<2} rssi={:>4} [{:>4}..{:>4}] n={:<4} seen {:>3}s ago: {}{}",
+                    n.addr.to_string(),
+                    n.channel,
+                    n.rssi,
+                    n.rssi_min,
+                    n.rssi_max,
+                    n.count,
+                    age(n.last_seen_ms),
+                    n.protocol.label(),
+                    name,
                 );
             }
         }

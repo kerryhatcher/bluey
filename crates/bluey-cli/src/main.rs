@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use bluey_core::framing::Item;
 use bluey_core::proto::{Bssid, Message, Mode, Snapshot};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use crate::port::{Event, Target};
 
 /// Reads what bluey devices hear: Bluetooth LE devices or WiFi access points.
 ///
-/// A device scans for one of the two at a time. With several devices plugged in, every
+/// A device scans for one thing at a time. With several devices plugged in, every
 /// command works on all of them, so one can be in each mode.
 #[derive(Parser)]
 #[command(version)]
@@ -32,32 +32,19 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum ModeArg {
-    /// Bluetooth LE devices
-    Ble,
-    /// WiFi access points
-    Wifi,
-}
-
-impl From<ModeArg> for Mode {
-    fn from(mode: ModeArg) -> Self {
-        match mode {
-            ModeArg::Ble => Mode::Ble,
-            ModeArg::Wifi => Mode::Wifi,
-        }
-    }
-}
-
 #[derive(Subcommand)]
 enum Command {
     /// List serial ports.
     Ports,
     /// Show each device and what it's doing.
     Devices,
-    /// Switch devices to scan for Bluetooth LE or WiFi.
+    /// Switch devices to scan for something else.
+    ///
+    /// ble: Bluetooth LE devices. wifi: WiFi access points. 802154: Zigbee and Thread devices.
+    /// A device has BLE and one of the other two, depending on the firmware flashed on it.
     Mode {
-        mode: ModeArg,
+        #[arg(value_parser = port::parse_mode)]
+        mode: Mode,
     },
     /// Show what the devices hear, as they hear it.
     Monitor,
@@ -86,7 +73,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Ports => port::list(),
         Command::Devices => devices(port::resolve(&cli.ports)?),
-        Command::Mode { mode } => set_mode(port::resolve(&cli.ports)?, mode.into()),
+        Command::Mode { mode } => set_mode(port::resolve(&cli.ports)?, mode),
         Command::Monitor => monitor(port::resolve(&cli.ports)?),
         Command::Log { output, truncate } => log(port::resolve(&cli.ports)?, &output, truncate),
         Command::Snapshot { json } => snapshot(port::resolve(&cli.ports)?, json),
@@ -97,14 +84,14 @@ fn main() -> Result<()> {
 /// Returns the first such snapshot from each device, ordered by port.
 fn gather(targets: Vec<Target>, wanted: impl Fn(&Target, &Snapshot) -> bool) -> Result<BTreeMap<String, Snapshot>> {
     let by_port: BTreeMap<_, _> = targets.iter().map(|t| (t.port.clone(), t.clone())).collect();
-    let updates = port::watch(targets);
+    let watch = port::watch(targets);
     let deadline = Instant::now() + ANSWER_TIMEOUT;
     let mut found = BTreeMap::new();
     let mut failures = Vec::new();
 
     while found.len() + failures.len() < by_port.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let update = match updates.recv_timeout(remaining) {
+        let update = match watch.recv_timeout(remaining) {
             Ok(update) => update,
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
         };
@@ -131,16 +118,34 @@ fn gather(targets: Vec<Target>, wanted: impl Fn(&Target, &Snapshot) -> bool) -> 
 
 fn devices(targets: Vec<Target>) -> Result<()> {
     for (port, s) in gather(targets, |_, _| true)? {
-        let heard = match s.mode {
-            Mode::Ble => format!("{} BLE devices", s.ble.len()),
-            Mode::Wifi => format!("{} WiFi access points", s.wifi.len()),
-        };
-        println!("{port}  {}  {}  up {}s  {heard}", Bssid(&s.device), s.mode.label(), s.uptime_ms / 1000);
+        let can: Vec<_> = s.supported.iter().map(|m| m.label()).collect();
+        println!(
+            "{port}  {}  {}  up {}s  {}  (can scan for: {})",
+            Bssid(&s.device),
+            s.mode.label(),
+            s.uptime_ms / 1000,
+            render::summary(&s),
+            can.join(", ")
+        );
     }
     Ok(())
 }
 
 fn set_mode(targets: Vec<Target>, mode: Mode) -> Result<()> {
+    // Ask what each device can do first, so a device that can't is reported as such rather
+    // than just never answering.
+    let unsupported: Vec<_> = gather(targets.clone(), |_, _| true)?
+        .into_iter()
+        .filter(|(_, s)| !s.supported.contains(&mode))
+        .map(|(port, s)| {
+            let can: Vec<_> = s.supported.iter().map(|m| m.label()).collect();
+            format!("{port} can only scan for {}; see the README for flashing the other firmware", can.join(" and "))
+        })
+        .collect();
+    if !unsupported.is_empty() {
+        bail!("{}", unsupported.join("\n"));
+    }
+
     let targets = targets.into_iter().map(|t| Target { mode: Some(mode), ..t }).collect();
     // An older periodic snapshot can arrive before the switch has happened.
     for (port, s) in gather(targets, |_, s| s.mode == mode)? {
@@ -151,7 +156,7 @@ fn set_mode(targets: Vec<Target>, mode: Mode) -> Result<()> {
 
 fn monitor(targets: Vec<Target>) -> Result<()> {
     let mut open = targets.len();
-    for update in port::watch(targets) {
+    for update in port::watch(targets).iter() {
         match update.event {
             Event::Item(Item::Message(Message::Snapshot(s))) => render::snapshot(&update.port, &s),
             Event::Item(Item::Message(Message::Log(line))) => render::log(&update.port, &line),
@@ -179,7 +184,7 @@ fn log(targets: Vec<Target>, output: &PathBuf, truncate: bool) -> Result<()> {
 
     let mut open = targets.len();
     let mut written = 0u64;
-    for update in port::watch(targets) {
+    for update in port::watch(targets).iter() {
         match update.event {
             Event::Item(Item::Message(Message::Snapshot(s))) => {
                 let line = serde_json::to_string(&record::Record::new(&update.port, &s)?)?;
@@ -189,10 +194,7 @@ fn log(targets: Vec<Target>, output: &PathBuf, truncate: bool) -> Result<()> {
                 eprintln!(
                     "{} snapshot {written}: {} -> {}",
                     render::label(&update.port, Some(&s)),
-                    match s.mode {
-                        Mode::Ble => format!("{} BLE devices", s.ble.len()),
-                        Mode::Wifi => format!("{} WiFi access points", s.wifi.len()),
-                    },
+                    render::summary(&s),
                     output.display()
                 );
             }

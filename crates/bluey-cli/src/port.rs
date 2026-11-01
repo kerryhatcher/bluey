@@ -2,8 +2,10 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -24,17 +26,20 @@ pub struct Target {
     pub mode: Option<Mode>,
 }
 
+/// Parses a mode name.
+pub fn parse_mode(s: &str) -> Result<Mode, String> {
+    Mode::from_label(s).ok_or_else(|| {
+        let names: Vec<_> = Mode::ALL.iter().map(|m| m.label()).collect();
+        format!("unknown mode {s:?}, expected one of: {}", names.join(", "))
+    })
+}
+
 /// Parses `PORT` or `PORT:MODE`, as in `/dev/ttyACM0:wifi`.
 pub fn parse_target(s: &str) -> Result<Target, String> {
     let Some((port, mode)) = s.rsplit_once(':') else {
         return Ok(Target { port: s.to_string(), mode: None });
     };
-    let mode = match mode {
-        "ble" => Mode::Ble,
-        "wifi" => Mode::Wifi,
-        other => return Err(format!("unknown mode {other:?}, expected ble or wifi")),
-    };
-    Ok(Target { port: port.to_string(), mode: Some(mode) })
+    Ok(Target { port: port.to_string(), mode: Some(parse_mode(mode)?) })
 }
 
 fn is_espressif(port: &SerialPortInfo) -> bool {
@@ -103,29 +108,61 @@ pub struct Update {
     pub event: Event,
 }
 
-/// Starts reading from every target, each on its own thread, and returns what they send.
-///
-/// The receiver ends once every device has gone away or been dropped.
-pub fn watch(targets: Vec<Target>) -> Receiver<Update> {
-    let (tx, rx) = mpsc::channel();
-    for target in targets {
-        let tx = tx.clone();
-        thread::spawn(move || {
-            let port = target.port.clone();
-            let result = read_loop(&target, |item| {
-                tx.send(Update { port: port.clone(), event: Event::Item(item) }).is_ok()
-            });
-            if let Err(e) = result {
-                let _ = tx.send(Update { port, event: Event::Closed(format!("{e:#}")) });
-            }
-        });
+/// Readers for a set of devices, each on its own thread. Dropping it stops them and
+/// closes the ports, so the devices can be opened again.
+pub struct Watch {
+    updates: Receiver<Update>,
+    stop: Arc<AtomicBool>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl Watch {
+    /// Waits for the next update. `Disconnected` means every device has gone away.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Update, RecvTimeoutError> {
+        self.updates.recv_timeout(timeout)
     }
-    rx
+
+    /// Everything the devices send, until they have all gone away.
+    pub fn iter(&self) -> impl Iterator<Item = Update> + '_ {
+        self.updates.iter()
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Starts reading from every target.
+pub fn watch(targets: Vec<Target>) -> Watch {
+    let (tx, updates) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let threads = targets
+        .into_iter()
+        .map(|target| {
+            let tx = tx.clone();
+            let stop = stop.clone();
+            thread::spawn(move || {
+                let port = target.port.clone();
+                let result = read_loop(&target, &stop, |item| {
+                    tx.send(Update { port: port.clone(), event: Event::Item(item) }).is_ok()
+                });
+                if let Err(e) = result {
+                    let _ = tx.send(Update { port, event: Event::Closed(format!("{e:#}")) });
+                }
+            })
+        })
+        .collect();
+    Watch { updates, stop, threads }
 }
 
 /// Opens the port, tells the device what we want, and passes everything it sends to `on_item`
 /// until that returns `false`.
-fn read_loop(target: &Target, mut on_item: impl FnMut(Item<Message>) -> bool) -> Result<()> {
+fn read_loop(target: &Target, stop: &AtomicBool, mut on_item: impl FnMut(Item<Message>) -> bool) -> Result<()> {
     let name = &target.port;
     let mut port = serialport::new(name, BAUD)
         .timeout(Duration::from_millis(250))
@@ -141,7 +178,7 @@ fn read_loop(target: &Target, mut on_item: impl FnMut(Item<Message>) -> bool) ->
 
     let mut decoder = Decoder::<Message>::new();
     let mut buf = [0u8; 4096];
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         let n = match port.read(&mut buf) {
             Ok(0) => return Err(anyhow!("{name} closed")),
             Ok(n) => n,
@@ -154,4 +191,5 @@ fn read_loop(target: &Target, mut on_item: impl FnMut(Item<Message>) -> bool) ->
             }
         }
     }
+    Ok(())
 }

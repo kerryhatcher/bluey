@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use bluey_core::adv::Mac;
-use bluey_core::proto::{Bssid, Snapshot};
+use bluey_core::proto::{Bssid, NodeAddr, Snapshot};
 use jiff::Timestamp;
 use serde::Serialize;
 
@@ -21,6 +21,7 @@ pub struct Record {
     uptime_ms: u64,
     ble: Vec<Ble>,
     wifi: Vec<Wifi>,
+    ieee802154: Vec<Node>,
 }
 
 #[derive(Serialize)]
@@ -43,6 +44,22 @@ struct Wifi {
     ssid: String,
     channel: u8,
     auth: String,
+    rssi: i8,
+    rssi_min: i8,
+    rssi_max: i8,
+    count: u32,
+    first_seen: Timestamp,
+    last_seen: Timestamp,
+}
+
+#[derive(Serialize)]
+struct Node {
+    pan_id: Option<String>,
+    addr: String,
+    addr_type: &'static str,
+    protocol: &'static str,
+    network_name: Option<String>,
+    channel: u8,
     rssi: i8,
     rssi_min: i8,
     rssi_max: i8,
@@ -97,6 +114,30 @@ impl Record {
             })
             .collect::<Result<_>>()?;
 
+        let ieee802154 = snapshot
+            .ieee802154
+            .iter()
+            .map(|n| {
+                Ok(Node {
+                    pan_id: n.pan_id.map(|p| format!("{p:04X}")),
+                    addr: n.addr.to_string(),
+                    addr_type: match n.addr {
+                        NodeAddr::Short(_) => "short",
+                        NodeAddr::Extended(_) => "extended",
+                    },
+                    protocol: n.protocol.label(),
+                    network_name: n.network_name.clone(),
+                    channel: n.channel,
+                    rssi: n.rssi,
+                    rssi_min: n.rssi_min,
+                    rssi_max: n.rssi_max,
+                    count: n.count,
+                    first_seen: at(n.first_seen_ms)?,
+                    last_seen: at(n.last_seen_ms)?,
+                })
+            })
+            .collect::<Result<_>>()?;
+
         Ok(Self {
             time: now,
             port: port.to_string(),
@@ -105,6 +146,7 @@ impl Record {
             uptime_ms: snapshot.uptime_ms,
             ble,
             wifi,
+            ieee802154,
         })
     }
 }

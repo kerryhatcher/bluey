@@ -15,6 +15,10 @@ bluey-core = { path = "crates/bluey-core" }
 postcard   = { version = "1", default-features = false, features = ["alloc"] }
 serde      = { version = "1", default-features = false, features = ["derive", "alloc"] }
 
+# esp-radio with two small fixes for the 802.15.4 scanner, see vendor/esp-radio/BLUEY-PATCHES.md.
+[patch.crates-io]
+esp-radio = { path = "vendor/esp-radio" }
+
 # Profiles only take effect in the workspace root. These are for the firmware, which is
 # resource-constrained; the host crates just inherit them.
 [profile.dev]

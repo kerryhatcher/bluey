@@ -9,6 +9,14 @@ rust-version.workspace = true
 name = "bluey-firmware"
 path = "./src/bin/main.rs"
 
+[features]
+# esp-radio can't be built with both WiFi and 802.15.4, so a firmware image has one of them
+# (plus BLE, which is always there). Pick the other with
+# `--no-default-features --features ieee802154`.
+default    = ["wifi"]
+wifi       = ["esp-radio/wifi"]
+ieee802154 = ["esp-radio/ieee802154"]
+
 [dependencies]
 bluey-core = { workspace = true }
 esp-hal = { version = "~1.2.2", features = ["esp32c6", "log-04", "unstable"] }
@@ -21,6 +29,7 @@ esp-rtos = { version = "0.4.0", features = [
   "log-04",
 ] }
 
+esp-storage            = { version = "0.10.0", features = ["esp32c6"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6", "log-04"] }
 log                    = "0.4.27"
 
@@ -44,7 +53,6 @@ esp-radio = { version = "1.0.0-beta.1", features = [
   "esp32c6",
   "log-04",
   "unstable",
-  "wifi",
 ] }
 trouble-host = { version = "0.7.0", features = ["gatt", "scan"] }
 
