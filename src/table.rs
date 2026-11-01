@@ -85,10 +85,11 @@ impl DeviceTable {
         self.devices.retain(|d| now - d.last_seen < max_age);
     }
 
-    /// A copy of the table, strongest signal first, so it can be printed outside a lock.
+    /// A copy of the table, ordered by address, so it can be printed outside a lock.
     pub fn snapshot(&self) -> Vec<Device> {
         let mut devices = self.devices.clone();
-        devices.sort_unstable_by_key(|d| core::cmp::Reverse(d.rssi));
+        // Addresses are stored least significant byte first, so compare them reversed.
+        devices.sort_unstable_by_key(|d| core::array::from_fn::<u8, 6, _>(|i| d.addr[5 - i]));
         devices
     }
 }

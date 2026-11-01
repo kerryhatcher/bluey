@@ -10,12 +10,12 @@ Built for a Seeed XIAO ESP32-C6, but any ESP32-C6 board should work.
 
 ## Output
 
-Every 10 seconds the firmware prints one line per device, strongest signal first:
+Every 10 seconds the firmware prints one line per device, sorted by address:
 
 ```
 ---- 3 devices ----
-CA:4B:97:87:FD:C3 (static) rssi= -74 [ -82.. -71] n=19   seen   1s ago: Apple Find My (AirTag/accessory)
 7A:D3:F9:09:57:82 ( rpa) rssi= -65 [ -80.. -63] n=101  seen  22s ago: Apple Nearby Info (iPhone/iPad/Mac/Watch)
+CA:4B:97:87:FD:C3 (static) rssi= -74 [ -82.. -71] n=19   seen   1s ago: Apple Find My (AirTag/accessory)
 ```
 
 | Field | Meaning |
