@@ -1,3 +1,4 @@
+mod gps;
 mod port;
 mod record;
 mod render;
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use bluey_core::framing::Item;
 use bluey_core::proto::{Bssid, Message, Mode, Snapshot};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use crate::port::{Event, Target};
 
@@ -32,6 +33,35 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Args)]
+struct GpsArgs {
+    /// USB GPS to take the position from, optionally with its speed: /dev/ttyUSB0 or
+    /// /dev/ttyUSB0:4800. Without this, the USB serial ports are searched for one.
+    #[arg(long, value_name = "PORT[:BAUD]", conflicts_with = "no_gps")]
+    gps: Option<String>,
+    /// Don't look for a GPS.
+    #[arg(long)]
+    no_gps: bool,
+}
+
+impl GpsArgs {
+    /// The GPS to use, if there is one.
+    fn open(&self) -> Result<Option<gps::Gps>> {
+        if self.no_gps {
+            return Ok(None);
+        }
+        let found = match &self.gps {
+            Some(spec) => Some(gps::open(spec)?),
+            None => gps::detect()?,
+        };
+        match &found {
+            Some(g) => eprintln!("position from the GPS on {} ({} baud)", g.port, g.baud),
+            None => eprintln!("no GPS found, so the log won't have positions (`--gps` names one)"),
+        }
+        Ok(found)
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// List serial ports.
@@ -48,7 +78,14 @@ enum Command {
     },
     /// Show what the devices hear, as they hear it.
     Monitor,
+    /// Show what the GPS reports, once a second.
+    Gps {
+        #[command(flatten)]
+        gps: GpsArgs,
+    },
     /// Append each snapshot from the devices to a file, one JSON object per line.
+    ///
+    /// If a USB GPS is plugged in, each snapshot also gets its position.
     Log {
         /// File to write to. It is created if it doesn't exist.
         #[arg(short, long)]
@@ -56,6 +93,8 @@ enum Command {
         /// Replace the file instead of adding to it.
         #[arg(long)]
         truncate: bool,
+        #[command(flatten)]
+        gps: GpsArgs,
     },
     /// Wait for a snapshot from each device, print them and exit.
     Snapshot {
@@ -75,7 +114,11 @@ fn main() -> Result<()> {
         Command::Devices => devices(port::resolve(&cli.ports)?),
         Command::Mode { mode } => set_mode(port::resolve(&cli.ports)?, mode),
         Command::Monitor => monitor(port::resolve(&cli.ports)?),
-        Command::Log { output, truncate } => log(port::resolve(&cli.ports)?, &output, truncate),
+        Command::Gps { gps } => match gps.open()? {
+            Some(g) => gps::watch(&g),
+            None => bail!("no GPS found; `--gps PORT` names one"),
+        },
+        Command::Log { output, truncate, gps } => log(port::resolve(&cli.ports)?, &output, truncate, gps.open()?),
         Command::Snapshot { json } => snapshot(port::resolve(&cli.ports)?, json),
     }
 }
@@ -173,7 +216,7 @@ fn monitor(targets: Vec<Target>) -> Result<()> {
     Ok(())
 }
 
-fn log(targets: Vec<Target>, output: &PathBuf, truncate: bool) -> Result<()> {
+fn log(targets: Vec<Target>, output: &PathBuf, truncate: bool, gps: Option<gps::Gps>) -> Result<()> {
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -187,12 +230,14 @@ fn log(targets: Vec<Target>, output: &PathBuf, truncate: bool) -> Result<()> {
     for update in port::watch(targets).iter() {
         match update.event {
             Event::Item(Item::Message(Message::Snapshot(s))) => {
-                let line = serde_json::to_string(&record::Record::new(&update.port, &s)?)?;
+                let reading = gps.as_ref().map(gps::Gps::reading);
+                let line = serde_json::to_string(&record::Record::new(&update.port, &s, reading.clone())?)?;
                 writeln!(file, "{line}")?;
                 file.flush()?;
                 written += 1;
+                let position = reading.map(|r| format!("  [{}]", gps::describe(&r))).unwrap_or_default();
                 eprintln!(
-                    "{} snapshot {written}: {} -> {}",
+                    "{} snapshot {written}: {} -> {}{position}",
                     render::label(&update.port, Some(&s)),
                     render::summary(&s),
                     output.display()
@@ -215,7 +260,7 @@ fn log(targets: Vec<Target>, output: &PathBuf, truncate: bool) -> Result<()> {
 fn snapshot(targets: Vec<Target>, json: bool) -> Result<()> {
     for (port, s) in gather(targets, |_, _| true)? {
         if json {
-            println!("{}", serde_json::to_string_pretty(&record::Record::new(&port, &s)?)?);
+            println!("{}", serde_json::to_string_pretty(&record::Record::new(&port, &s, None)?)?);
         } else {
             render::snapshot(&port, &s);
         }

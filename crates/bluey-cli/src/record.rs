@@ -4,6 +4,8 @@
 //! wall-clock times using the moment the snapshot arrived.
 
 use anyhow::Result;
+
+use crate::gps::Reading;
 use bluey_core::adv::Mac;
 use bluey_core::proto::{Bssid, NodeAddr, Snapshot};
 use jiff::Timestamp;
@@ -22,6 +24,9 @@ pub struct Record {
     ble: Vec<Ble>,
     wifi: Vec<Wifi>,
     ieee802154: Vec<Node>,
+    /// Where the snapshot was taken. Absent if no GPS was in use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gps: Option<Reading>,
 }
 
 #[derive(Serialize)]
@@ -69,7 +74,7 @@ struct Node {
 }
 
 impl Record {
-    pub fn new(port: &str, snapshot: &Snapshot) -> Result<Self> {
+    pub fn new(port: &str, snapshot: &Snapshot, gps: Option<Reading>) -> Result<Self> {
         let now = Timestamp::now();
         // Converts a device uptime into wall-clock time.
         let at = |uptime_ms: u64| -> Result<Timestamp> {
@@ -147,6 +152,7 @@ impl Record {
             ble,
             wifi,
             ieee802154,
+            gps,
         })
     }
 }

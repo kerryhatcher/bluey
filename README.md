@@ -69,6 +69,7 @@ bluey mode wifi               # switch devices to WiFi (or `ble`, or `802154`)
 bluey monitor                 # show snapshots and device logs as they arrive
 bluey snapshot [--json]       # print a snapshot from each device and exit
 bluey log -o hears.jsonl      # append every snapshot to a file, one JSON object per line
+bluey gps                     # show what a USB GPS reports
 ```
 
 ### Several devices
@@ -125,6 +126,38 @@ cargo test                                  # host crates
 cargo clippy --workspace --exclude bluey-firmware --all-targets
 cd firmware && cargo clippy --release       # firmware
 ```
+
+### Position from a GPS
+
+If a USB GPS is plugged in, `bluey log` puts its position in every record, so you can map where
+things were heard. It looks for one among the USB serial ports that aren't bluey devices, and
+accepts any receiver that sends NMEA over serial (most USB pucks do), at 4800, 9600, 38400 or
+115200 baud. To name one instead, or to turn the search off:
+
+```
+bluey log -o hears.jsonl --gps /dev/ttyUSB0          # speed is detected
+bluey log -o hears.jsonl --gps /dev/ttyUSB0:4800     # or given
+bluey log -o hears.jsonl --no-gps
+```
+
+Searching opens each candidate port and listens for a second or two. That is harmless for a
+GPS, but a board that restarts when its port is opened (an Arduino, say) would restart, so
+use `--gps` or `--no-gps` if you have one plugged in. `bluey gps` shows the position once a
+second, which is a quick way to see whether the receiver has a fix yet. That takes a minute or
+two from a cold start, and a clear view of the sky.
+
+Each record gets a `gps` object. Without a fix it only says so, and how many satellites the
+receiver is using:
+
+```json
+"gps":{"fix":true,"satellites":6,"latitude":48.1173,"longitude":11.516667,"altitude_m":545.4,"hdop":0.9,"speed_mps":0.0,"course_deg":84.4,"age_ms":43}
+"gps":{"fix":false,"satellites":0,"age_ms":120}
+```
+
+`hdop` is the receiver's own estimate of how good the position is: lower is better, and under
+2 is good. `age_ms` is how long ago the receiver last reported, and a reading older than five
+seconds counts as no fix. Records have no `gps` field when no GPS is in use. Note that a log
+with positions records where you were, so think before sharing it.
 
 ## 802.15.4 (Zigbee and Thread)
 
