@@ -1,4 +1,5 @@
 mod gps;
+mod home;
 mod port;
 mod record;
 mod store;
@@ -165,6 +166,20 @@ enum Command {
         #[command(flatten)]
         gps: GpsArgs,
     },
+    /// Record what the devices hear every few seconds, until stopped.
+    ///
+    /// Like `log`, but the CLI asks each scanner for a snapshot on a timer, so the rows are evenly
+    /// spaced (`log` takes what the devices send on their own, every 10 seconds). Takes the same
+    /// options as `log`, and records to the same GeoPackage unless told otherwise.
+    Poll {
+        /// Seconds between snapshots.
+        #[arg(long, default_value_t = 5, value_name = "SECONDS")]
+        every: u64,
+        #[command(flatten)]
+        store: StoreArgs,
+        #[command(flatten)]
+        gps: GpsArgs,
+    },
     /// Send what the scanners hear (and the GPS position) to a dashboard device.
     ///
     /// The dashboard is an ESP32-S3 with a screen that runs its own Wi-Fi network and web page.
@@ -192,6 +207,7 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    home::ensure()?;
     match cli.command {
         Command::Ports => port::list(),
         Command::Devices => devices(port::resolve(&cli.ports)?),
@@ -202,6 +218,7 @@ fn main() -> Result<()> {
             None => bail!("no GPS found; `--gps PORT` names one"),
         },
         Command::Log { store, gps } => log(port::resolve(&cli.ports)?, store.open(true)?, gps.open()?),
+        Command::Poll { every, store, gps } => poll(port::resolve(&cli.ports)?, store.open(true)?, gps.open()?, every),
         Command::Dashboard { record, store, gps } => {
             dashboard(port::resolve(&cli.ports)?, store.open(record)?, gps.open()?)
         }
@@ -383,6 +400,65 @@ fn log(targets: Vec<Target>, mut sinks: Sinks, gps: Option<gps::Gps>) -> Result<
         }
     }
     Ok(())
+}
+
+/// Asks every scanner for a snapshot each `every` seconds, and records each answer. Runs until
+/// every device has gone away, or until it is stopped.
+fn poll(targets: Vec<Target>, mut sinks: Sinks, gps: Option<gps::Gps>, every: u64) -> Result<()> {
+    if every == 0 {
+        bail!("--every must be at least 1 second");
+    }
+    if sinks.is_empty() {
+        bail!("nothing to record to: drop --no-gpkg, or give --output FILE");
+    }
+
+    let period = Duration::from_secs(every);
+    let ports: Vec<String> = targets.iter().map(|t| t.port.clone()).collect();
+    let mut open = ports.len();
+    let mut dashboards = BTreeSet::new();
+    // Scanners asked for a snapshot that haven't answered yet. Only that answer is recorded, so
+    // the devices' own periodic snapshots don't add rows between the requested ones.
+    let mut awaiting: BTreeSet<String> = BTreeSet::new();
+
+    let watch = port::watch(targets);
+    let mut next = Instant::now();
+    loop {
+        if Instant::now() >= next {
+            awaiting.clear();
+            for port in ports.iter().filter(|p| !dashboards.contains(*p)) {
+                watch.send(port, &DeviceCommand::Snapshot);
+                awaiting.insert(port.clone());
+            }
+            next = Instant::now() + period;
+        }
+
+        let update = match watch.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            Ok(update) => update,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => bail!("all devices are gone"),
+        };
+        match update.event {
+            Event::Item(Item::Message(Message::Snapshot(s))) => {
+                if awaiting.remove(&update.port) {
+                    sinks.record(&update.port, &s, gps.as_ref())?;
+                }
+            }
+            Event::Item(Item::Message(Message::Log(line))) => render::log(&update.port, &line),
+            Event::Item(Item::Message(Message::Hello(hello))) => {
+                if hello.role == Role::Dashboard && dashboards.insert(update.port.clone()) {
+                    eprintln!("{} is a dashboard, not a scanner: not asking it for snapshots", port::short_name(&update.port));
+                }
+            }
+            Event::Item(Item::Text(_)) => {}
+            Event::Closed(reason) => {
+                eprintln!("{}: {reason}", update.port);
+                open -= 1;
+                if open == 0 {
+                    bail!("all devices are gone");
+                }
+            }
+        }
+    }
 }
 
 /// How often the GPS position is sent to a dashboard.

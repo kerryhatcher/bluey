@@ -70,6 +70,7 @@ bluey mode wifi               # switch devices to WiFi (or `ble`, or `802154`)
 bluey monitor                 # show snapshots and device logs as they arrive
 bluey snapshot [--json]       # print a snapshot from each device and exit
 bluey log                     # record everything heard into a GeoPackage, to map and plot later
+bluey poll [--every 5]        # like `log`, but asks for a snapshot every few seconds, until stopped
 bluey gps                     # show what a USB GPS reports
 bluey dashboard               # pass it all on to a dashboard device with a screen
 ```
