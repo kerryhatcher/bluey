@@ -4,6 +4,7 @@ mod port;
 mod record;
 mod store;
 mod render;
+mod tui;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -180,6 +181,18 @@ enum Command {
         #[command(flatten)]
         gps: GpsArgs,
     },
+    /// Show the devices heard recently in a live table, strongest signal first.
+    ///
+    /// Reads the GeoPackage that `log` and `poll` record to, and never changes it. Each device
+    /// is listed once, with the strongest signal it had in the window. Press q to quit.
+    Tui {
+        /// GeoPackage to read, instead of the one in the XDG data folder.
+        #[arg(long, value_name = "FILE")]
+        gpkg: Option<PathBuf>,
+        /// How far back to look, in minutes.
+        #[arg(long, default_value_t = 15, value_name = "MINUTES")]
+        minutes: u64,
+    },
     /// Send what the scanners hear (and the GPS position) to a dashboard device.
     ///
     /// The dashboard is an ESP32-S3 with a screen that runs its own Wi-Fi network and web page.
@@ -219,6 +232,7 @@ fn main() -> Result<()> {
         },
         Command::Log { store, gps } => log(port::resolve(&cli.ports)?, store.open(true)?, gps.open()?),
         Command::Poll { every, store, gps } => poll(port::resolve(&cli.ports)?, store.open(true)?, gps.open()?, every),
+        Command::Tui { gpkg, minutes } => tui::run(gpkg, minutes),
         Command::Dashboard { record, store, gps } => {
             dashboard(port::resolve(&cli.ports)?, store.open(record)?, gps.open()?)
         }

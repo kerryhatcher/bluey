@@ -181,7 +181,7 @@ impl GeoPackage {
 }
 
 /// A time as GeoPackage wants it: UTC, to the millisecond, `2026-11-01T03:54:09.233Z`.
-fn time(t: Timestamp) -> String {
+pub(crate) fn time(t: Timestamp) -> String {
     t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
