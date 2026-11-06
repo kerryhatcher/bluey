@@ -70,6 +70,15 @@ impl GeoPackage {
 
         conn.execute_batch(&format!("PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {USER_VERSION};"))?;
         conn.execute_batch(SCHEMA)?;
+        // Files made before advert data was recorded lack the column.
+        let has_adv: bool = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('observations') WHERE name = 'adv'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_adv {
+            conn.execute_batch("ALTER TABLE observations ADD COLUMN adv BLOB")?;
+        }
         conn.execute(
             "INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, description, srs_id) \
              VALUES (?1, 'features', ?1, 'Devices heard by bluey scanners, with signal strength, time and position', ?2)",
@@ -116,7 +125,8 @@ impl GeoPackage {
                            detail: Option<&str>,
                            channel: Option<u8>,
                            (rssi, min, max, count): (i8, i8, i8, u32),
-                           (first, last): (Timestamp, Timestamp)|
+                           (first, last): (Timestamp, Timestamp),
+                           adv: Option<&[u8]>|
              -> rusqlite::Result<()> {
                 insert.execute(params![
                     geometry,
@@ -140,6 +150,7 @@ impl GeoPackage {
                     altitude,
                     hdop,
                     satellites,
+                    adv,
                 ])?;
                 rows += 1;
                 Ok(())
@@ -147,13 +158,14 @@ impl GeoPackage {
 
             for d in &record.ble {
                 add("ble", &d.addr, d.name.as_deref(), d.kind, Some(d.addr_type), None,
-                    (d.rssi, d.rssi_min, d.rssi_max, d.count), (d.first_seen, d.last_seen))?;
+                    (d.rssi, d.rssi_min, d.rssi_max, d.count), (d.first_seen, d.last_seen),
+                    Some(d.adv.as_slice()).filter(|a| !a.is_empty()))?;
             }
             for ap in &record.wifi {
                 // A hidden network has no name, which is not the same as a name that is empty.
                 let ssid = Some(ap.ssid.as_str()).filter(|s| !s.is_empty());
                 add("wifi", &ap.bssid, ssid, &ap.auth, None, Some(ap.channel),
-                    (ap.rssi, ap.rssi_min, ap.rssi_max, ap.count), (ap.first_seen, ap.last_seen))?;
+                    (ap.rssi, ap.rssi_min, ap.rssi_max, ap.count), (ap.first_seen, ap.last_seen), None)?;
             }
             for n in &record.ieee802154 {
                 let device = match &n.pan_id {
@@ -161,7 +173,7 @@ impl GeoPackage {
                     None => n.addr.clone(),
                 };
                 add("802154", &device, n.network_name.as_deref(), n.protocol, Some(n.addr_type), Some(n.channel),
-                    (n.rssi, n.rssi_min, n.rssi_max, n.count), (n.first_seen, n.last_seen))?;
+                    (n.rssi, n.rssi_min, n.rssi_max, n.count), (n.first_seen, n.last_seen), None)?;
             }
         }
 
@@ -181,7 +193,7 @@ impl GeoPackage {
 }
 
 /// A time as GeoPackage wants it: UTC, to the millisecond, `2026-11-01T03:54:09.233Z`.
-fn time(t: Timestamp) -> String {
+pub(crate) fn time(t: Timestamp) -> String {
     t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
@@ -201,8 +213,8 @@ fn point(longitude: f64, latitude: f64) -> Vec<u8> {
 }
 
 const INSERT: &str = "INSERT INTO observations (geom, time, scanner, port, kind, device, label, category, detail, channel, \
-     rssi, rssi_min, rssi_max, \"count\", first_seen, last_seen, latitude, longitude, altitude_m, hdop, satellites) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)";
+     rssi, rssi_min, rssi_max, \"count\", first_seen, last_seen, latitude, longitude, altitude_m, hdop, satellites, adv) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)";
 
 /// The tables every GeoPackage has, and the `observations` layer.
 const SCHEMA: &str = r#"
@@ -271,7 +283,8 @@ CREATE TABLE IF NOT EXISTS observations (
   longitude REAL,
   altitude_m REAL,
   hdop REAL,
-  satellites INTEGER
+  satellites INTEGER,
+  adv BLOB                        -- BLE only: the latest advertisement's data, as on the air
 );
 CREATE INDEX IF NOT EXISTS observations_time ON observations (time);
 CREATE INDEX IF NOT EXISTS observations_device ON observations (kind, device, time);
@@ -303,6 +316,7 @@ mod tests {
                 count: 12,
                 first_seen_ms: 10_000,
                 last_seen_ms: 97_000,
+                adv: vec![2, 0x01, 0x06, 4, 0xFF, 0x4C, 0x00, 0x12],
             }],
             wifi: vec![AccessPoint {
                 bssid: [0xF4, 0x92, 0xBF, 0x92, 0x56, 0xC9],
@@ -418,6 +432,32 @@ mod tests {
         let first: String = conn.query_row("SELECT first_seen FROM observations WHERE kind = 'ble'", [], |r| r.get(0)).unwrap();
         assert_eq!(first.len(), 24, "{first}");
         assert!(first.ends_with('Z') && first.as_bytes()[10] == b'T', "{first}");
+    }
+
+    #[test]
+    fn keeps_ble_advert_data() {
+        let temp = Temp::new();
+        let mut store = GeoPackage::open(&temp.file()).unwrap();
+        store.record(&Record::new("p", &snapshot(), None).unwrap()).unwrap();
+
+        let conn = Connection::open(temp.file()).unwrap();
+        let adv: Vec<u8> = conn.query_row("SELECT adv FROM observations WHERE kind = 'ble'", [], |r| r.get(0)).unwrap();
+        assert_eq!(adv, [2, 0x01, 0x06, 4, 0xFF, 0x4C, 0x00, 0x12]);
+        let others: i64 = conn.query_row("SELECT count(adv) FROM observations WHERE kind <> 'ble'", [], |r| r.get(0)).unwrap();
+        assert_eq!(others, 0);
+    }
+
+    #[test]
+    fn adds_the_adv_column_to_an_older_file() {
+        let temp = Temp::new();
+        drop(GeoPackage::open(&temp.file()).unwrap());
+        // Make it look like a file from before advert data was recorded.
+        Connection::open(temp.file()).unwrap().execute_batch("ALTER TABLE observations DROP COLUMN adv").unwrap();
+
+        let mut store = GeoPackage::open(&temp.file()).unwrap();
+        assert_eq!(store.record(&Record::new("p", &snapshot(), None).unwrap()).unwrap(), 3);
+        let conn = Connection::open(temp.file()).unwrap();
+        assert_eq!(conn.query_row("SELECT count(adv) FROM observations", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]

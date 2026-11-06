@@ -214,6 +214,7 @@ mod tests {
                 count: 12,
                 first_seen_ms: 10_000,
                 last_seen_ms: 97_000,
+                adv: vec![2, 0x01, 0x06, 4, 0xFF, 0x4C, 0x00, 0x12],
             }],
             wifi: vec![AccessPoint {
                 bssid: [0xF4, 0x92, 0xBF, 0x92, 0x56, 0xC9],

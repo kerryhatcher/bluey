@@ -18,7 +18,7 @@ use bluey_firmware::settings::Settings;
 use bluey_firmware::table::DeviceTable;
 use bluey_firmware::wifi::AccessPointTable;
 use bt_hci::controller::ExternalController;
-use bt_hci::param::{AddrKind, FilterDuplicates, LeAdvReportsIter};
+use bt_hci::param::{AddrKind, FilterDuplicates, LeAdvEventKind, LeAdvReportsIter};
 use core::cell::{Cell, RefCell};
 use core::convert::Infallible;
 use critical_section::Mutex;
@@ -103,8 +103,9 @@ impl EventHandler for AdvRecorder {
             };
             let class = AddrClass::new(report.addr_kind == AddrKind::RANDOM, &addr);
             let summary = summarize(report.data);
+            let scan_response = report.event_kind == LeAdvEventKind::ScanRsp;
             critical_section::with(|cs| {
-                DEVICES.borrow_ref_mut(cs).record(addr, class, report.rssi, &summary, now);
+                DEVICES.borrow_ref_mut(cs).record(addr, class, report.rssi, report.data, scan_response, &summary, now);
             });
         }
     }

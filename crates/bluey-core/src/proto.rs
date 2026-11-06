@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::adv::{AddrClass, Kind};
 
 /// Bumped whenever the encoding of [`Message`] changes incompatibly.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// What the device is scanning for. It has one radio, so it can only do one at a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +150,9 @@ pub struct BleDevice {
     pub count: u32,
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
+    /// The advertising data of the latest advertisement, as on the air (scan responses are left
+    /// out). Empty if only scan responses have been heard.
+    pub adv: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

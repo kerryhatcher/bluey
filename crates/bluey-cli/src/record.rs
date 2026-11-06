@@ -41,6 +41,9 @@ pub(crate) struct Ble {
     pub(crate) count: u32,
     pub(crate) first_seen: Timestamp,
     pub(crate) last_seen: Timestamp,
+    /// The latest advertisement's data. Written as hex.
+    #[serde(serialize_with = "as_hex")]
+    pub(crate) adv: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -97,6 +100,7 @@ impl Record {
                     count: d.count,
                     first_seen: at(d.first_seen_ms)?,
                     last_seen: at(d.last_seen_ms)?,
+                    adv: d.adv.clone(),
                 })
             })
             .collect::<Result<_>>()?;
@@ -154,5 +158,29 @@ impl Record {
             ieee802154,
             gps,
         })
+    }
+}
+
+/// Bytes as lowercase hex, two digits each.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+fn as_hex<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&hex(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_is_lowercase_pairs() {
+        assert_eq!(hex(&[0x02, 0x01, 0xff, 0x4c]), "0201ff4c");
+        assert_eq!(hex(&[]), "");
     }
 }
