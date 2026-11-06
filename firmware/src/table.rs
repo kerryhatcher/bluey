@@ -22,6 +22,8 @@ struct Device {
     count: u32,
     first_seen: Instant,
     last_seen: Instant,
+    /// The latest advertisement's data. Scan responses don't replace it.
+    adv: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -34,11 +36,23 @@ impl DeviceTable {
         Self { devices: Vec::new() }
     }
 
-    /// Records one advertisement or scan response.
+    /// Records one advertisement or scan response. `data` is its advertising data and
+    /// `summary` what [`bluey_core::adv::summarize`] made of it.
     ///
     /// Scan responses carry no manufacturer data, so they only ever fill in details
-    /// (name, kind) that the device's advertisements haven't provided yet.
-    pub fn record(&mut self, addr: [u8; 6], class: AddrClass, rssi: i8, summary: &Summary<'_>, now: Instant) {
+    /// (name, kind) that the device's advertisements haven't provided yet, and their data
+    /// isn't kept.
+    #[allow(clippy::too_many_arguments, reason = "all of these come straight from one report")]
+    pub fn record(
+        &mut self,
+        addr: [u8; 6],
+        class: AddrClass,
+        rssi: i8,
+        data: &[u8],
+        scan_response: bool,
+        summary: &Summary<'_>,
+        now: Instant,
+    ) {
         let index = match self.devices.iter().position(|d| d.addr == addr) {
             Some(index) => index,
             None => {
@@ -59,6 +73,7 @@ impl DeviceTable {
                     count: 0,
                     first_seen: now,
                     last_seen: now,
+                    adv: Vec::new(),
                 });
                 self.devices.len() - 1
             }
@@ -70,6 +85,11 @@ impl DeviceTable {
         device.rssi_max = device.rssi_max.max(rssi);
         device.count += 1;
         device.last_seen = now;
+        if !scan_response {
+            // Reuses the allocation: a device's adverts are usually the same length.
+            device.adv.clear();
+            device.adv.extend_from_slice(data);
+        }
         if matches!(device.kind, Kind::Unknown | Kind::OtherManufacturer(_)) && summary.kind != Kind::Unknown {
             device.kind = summary.kind;
         }
@@ -106,6 +126,7 @@ impl DeviceTable {
                 count: d.count,
                 first_seen_ms: d.first_seen.as_millis(),
                 last_seen_ms: d.last_seen.as_millis(),
+                adv: d.adv.clone(),
             })
             .collect();
         // Addresses are stored least significant byte first, so compare them reversed.
